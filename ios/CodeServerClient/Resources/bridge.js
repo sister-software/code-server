@@ -141,3 +141,42 @@
     },
   }
 })()
+
+// --- Local files bridge relay -----------------------------------------------
+//
+// The ipad-files web extension runs in a Web Worker (no window.webkit). It talks
+// to the main frame over a same-origin BroadcastChannel; this relay forwards each
+// request to the native `fileBridge` reply handler and posts the result back.
+// Runs only in the top frame so there's exactly one relay. BroadcastChannel is
+// not CSP-governed, so this needs no connect-src allowance.
+;(function () {
+  "use strict"
+
+  if (window.top !== window) return // single relay, top frame only
+  if (typeof BroadcastChannel === "undefined") return
+
+  var fileBridge =
+    window.webkit &&
+    window.webkit.messageHandlers &&
+    window.webkit.messageHandlers.fileBridge
+  if (!fileBridge) return
+
+  var channel = new BroadcastChannel("ipadfs-bridge")
+  channel.onmessage = function (event) {
+    var msg = event.data
+    if (!msg || typeof msg.reqId !== "string" || !msg.op) return // ignore responses/noise
+    fileBridge
+      .postMessage({ op: msg.op, params: msg.params || {}, data: msg.bodyBase64 || null })
+      .then(
+        function (result) {
+          channel.postMessage({ reqId: msg.reqId, result: result })
+        },
+        function (error) {
+          channel.postMessage({
+            reqId: msg.reqId,
+            result: { ok: false, status: 500, error: String(error) },
+          })
+        },
+      )
+  }
+})()

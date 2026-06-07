@@ -15,6 +15,8 @@ final class WebViewController: UIViewController {
     private let url: URL
     private(set) var webView: WKWebView!
     private let errorOverlay = ErrorOverlayView()
+    private let fileBridge = FileBridgeSchemeHandler()
+    private let fileBridgeMessages = FileBridgeMessageHandler()
 
     /// Latest editor state captured before a likely jetsam, replayed after reload.
     private var pendingState: String?
@@ -58,7 +60,18 @@ final class WebViewController: UIViewController {
             )
         }
         content.addScriptMessageHandler(self, contentWorld: .page, name: "clipboard")
+
+        // Primary local-files transport: the ipad-files web extension (in a Web
+        // Worker, no window.webkit) reaches native via a same-origin
+        // BroadcastChannel relayed by bridge.js to this reply handler. Not CSP-
+        // governed, so it needs no connect-src allowance.
+        content.addScriptMessageHandler(fileBridgeMessages, contentWorld: .page, name: FileBridgeMessageHandler.name)
         config.userContentController = content
+
+        // Fallback transport (unused while BroadcastChannel works): fetch() to
+        // ipadbridge://. Requires connect-src to allow the scheme, so it's only
+        // viable with a CSP change (nginx/patch).
+        config.setURLSchemeHandler(fileBridge, forURLScheme: FileBridgeSchemeHandler.scheme)
 
         let webView = WKWebView(frame: container.bounds, configuration: config)
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -90,6 +103,7 @@ final class WebViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        LocalFileStore.shared.presenter = self // present the folder picker from here
         load()
 
         // Keyboardless entry to the action menu: two-finger long press.

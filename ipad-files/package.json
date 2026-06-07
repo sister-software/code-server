@@ -1,0 +1,51 @@
+{
+  "name": "ipad-files",
+  "displayName": "iPad Local Files",
+  "description": "Browse and edit iPad/iCloud local files in code-server, bridged through the native iOS wrapper.",
+  "version": "0.1.0",
+  "publisher": "sister-software",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sister-software/code-server"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "browser": "./dist/extension.js",
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onFileSystem:ipadfs"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "ipadFiles.openFolder",
+        "title": "Open Local Folder…",
+        "category": "iPad"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package --no-dependencies -o ipad-files.vsix"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.4.0"
+  }
+}
