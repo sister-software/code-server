@@ -1,4 +1,5 @@
 import UIKit
+import WebKit
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -6,7 +7,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        true
+        WKWebView.disableInputAccessoryViewGlobally()
+        return true
     }
 
     // Scene configuration is declared in Info.plist (UIApplicationSceneManifest).

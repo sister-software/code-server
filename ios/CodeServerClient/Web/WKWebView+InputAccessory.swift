@@ -2,46 +2,32 @@ import UIKit
 import WebKit
 import ObjectiveC
 
-/// Removes the input accessory view — the floating bar above the keyboard with
-/// the prev/next arrows and dictation control — from a WKWebView.
-///
-/// WKWebView delegates first-responder duties to an internal `WKContentView`, so
-/// overriding `inputAccessoryView` on WKWebView has no effect. Instead we install
-/// a runtime subclass of the content view whose `inputAccessoryView` returns nil.
-/// On a code editor that bar is pure noise and it shoves the web content upward
-/// every time an input is focused.
 extension WKWebView {
-    func removeInputAccessoryView() {
-        guard let contentView = scrollView.subviews.first(where: {
-            String(describing: type(of: $0)).hasPrefix("WKContent")
-        }), let targetClass = object_getClass(contentView) else {
-            return
-        }
+    /// Removes the floating input accessory / assistant bar (the prev-next arrows
+    /// + dictation pill) from every WKWebView by overriding `inputAccessoryView`
+    /// on the private `WKContentView` class to return nil.
+    ///
+    /// Done at the class level (call once at launch) rather than per-instance: the
+    /// per-instance `object_setClass` approach worked in the simulator but missed
+    /// on device, because the content view that becomes first responder can be
+    /// created/swapped after our hook ran. Overriding the class covers every
+    /// instance regardless of timing.
+    static func disableInputAccessoryViewGlobally() {
+        guard let contentViewClass = NSClassFromString("WKContentView") else { return }
+        let selector = #selector(getter: UIResponder.inputAccessoryView)
 
-        let newClassName = "\(targetClass)_NoInputAccessory"
+        let block: @convention(block) (AnyObject) -> UIView? = { _ in nil }
+        let implementation = imp_implementationWithBlock(block)
 
-        if let existing = NSClassFromString(newClassName) {
-            object_setClass(contentView, existing)
-            return
-        }
+        guard let template = class_getInstanceMethod(UIResponder.self, selector) else { return }
+        let typeEncoding = method_getTypeEncoding(template)
 
-        guard let newClass = objc_allocateClassPair(targetClass, newClassName, 0) else { return }
-        if let method = class_getInstanceMethod(
-            NoInputAccessoryShim.self,
-            #selector(getter: NoInputAccessoryShim.inputAccessoryView)
-        ) {
-            class_addMethod(
-                newClass,
-                #selector(getter: UIResponder.inputAccessoryView),
-                method_getImplementation(method),
-                method_getTypeEncoding(method)
-            )
+        // If WKContentView doesn't define its own getter, add ours (overrides the
+        // inherited one). If it does, replace that implementation in place.
+        if !class_addMethod(contentViewClass, selector, implementation, typeEncoding) {
+            if let existing = class_getInstanceMethod(contentViewClass, selector) {
+                method_setImplementation(existing, implementation)
+            }
         }
-        objc_registerClassPair(newClass)
-        object_setClass(contentView, newClass)
     }
-}
-
-private final class NoInputAccessoryShim: NSObject {
-    @objc var inputAccessoryView: UIView? { nil }
 }

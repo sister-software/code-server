@@ -190,20 +190,47 @@ final class WebViewController: UIViewController {
     // MARK: - Action menu / settings
 
     override var keyCommands: [UIKeyCommand]? {
-        [
-            keyCommand(",", #selector(openSettings), title: "Servers"),
-            keyCommand("r", #selector(reloadPage), title: "Reload"),
+        var commands = [
+            keyCommand(",", [.command, .alternate], #selector(openSettings), title: "Servers"),
+            keyCommand("r", [.command, .alternate], #selector(reloadPage), title: "Reload"),
         ]
+        // Reclaim Cmd-C/X/V. iPad otherwise hands these to WebKit's selection-based
+        // edit actions, so VS Code's richer behavior (copy/cut the whole line with
+        // no selection, paste via our clipboard shim) never runs. We capture them
+        // and forward a synthetic keydown so VS Code's keybindings fire.
+        commands.append(keyCommand("c", .command, #selector(forwardCopy)))
+        commands.append(keyCommand("x", .command, #selector(forwardCut)))
+        commands.append(keyCommand("v", .command, #selector(forwardPaste)))
+        return commands
     }
 
-    private func keyCommand(_ input: String, _ action: Selector, title: String) -> UIKeyCommand {
-        // Cmd+Opt+<key> avoids VS Code's own Cmd shortcuts (e.g. Cmd+, / Cmd+R).
-        let command = UIKeyCommand(input: input, modifierFlags: [.command, .alternate], action: action)
+    private func keyCommand(
+        _ input: String,
+        _ modifiers: UIKeyModifierFlags,
+        _ action: Selector,
+        title: String? = nil
+    ) -> UIKeyCommand {
+        let command = UIKeyCommand(input: input, modifierFlags: modifiers, action: action)
         command.discoverabilityTitle = title
         if #available(iOS 15.0, *) {
             command.wantsPriorityOverSystemBehavior = true
         }
         return command
+    }
+
+    @objc private func forwardCopy() { forwardKey("c", "KeyC", 67) }
+    @objc private func forwardCut() { forwardKey("x", "KeyX", 88) }
+    @objc private func forwardPaste() { forwardKey("v", "KeyV", 86) }
+
+    /// Dispatch a Cmd-modified keydown into the page so VS Code's keybinding runs.
+    /// Our navigator.clipboard shim handles the actual read/write to UIPasteboard,
+    /// so this works without a user-gesture clipboard grant.
+    private func forwardKey(_ key: String, _ code: String, _ keyCode: Int) {
+        let js = """
+        window.__codeServerBridge && window.__codeServerBridge.dispatchKey(\
+        {key:'\(key)',code:'\(code)',keyCode:\(keyCode),meta:true})
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     @objc private func openSettings() {
@@ -256,7 +283,6 @@ final class WebViewController: UIViewController {
 
 extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        webView.removeInputAccessoryView() // kill the floating prev/next + dictation bar
         loadSucceeded()
         restoreStateIfNeeded()
     }
