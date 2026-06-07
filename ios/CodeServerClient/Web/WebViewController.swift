@@ -74,7 +74,7 @@ final class WebViewController: UIViewController {
         config.setURLSchemeHandler(fileBridge, forURLScheme: FileBridgeSchemeHandler.scheme)
 
         let webView = WKWebView(frame: container.bounds, configuration: config)
-        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = false
@@ -85,6 +85,15 @@ final class WebViewController: UIViewController {
         }
         container.addSubview(webView)
         self.webView = webView
+
+        // Pin below the top safe area so VS Code's title bar doesn't render under
+        // the status bar clock; full-bleed on the other edges.
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
 
         errorOverlay.translatesAutoresizingMaskIntoConstraints = false
         errorOverlay.isHidden = true
@@ -201,18 +210,15 @@ final class WebViewController: UIViewController {
     // MARK: - Action menu / settings
 
     override var keyCommands: [UIKeyCommand]? {
-        var commands = [
+        // Note: we deliberately do NOT bind Cmd-C/X/V here. VS Code's editor uses
+        // the native DOM clipboard events (copy/cut/paste + clipboardData); letting
+        // WebKit handle these keeps copy-with-selection and paste working. (Empty-
+        // selection line-copy is a separate WebKit limitation — the copy event
+        // doesn't fire without a selection.)
+        [
             keyCommand(",", [.command, .alternate], #selector(openSettings), title: "Servers"),
             keyCommand("r", [.command, .alternate], #selector(reloadPage), title: "Reload"),
         ]
-        // Reclaim Cmd-C/X/V. iPad otherwise hands these to WebKit's selection-based
-        // edit actions, so VS Code's richer behavior (copy/cut the whole line with
-        // no selection, paste via our clipboard shim) never runs. We capture them
-        // and forward a synthetic keydown so VS Code's keybindings fire.
-        commands.append(keyCommand("c", .command, #selector(forwardCopy)))
-        commands.append(keyCommand("x", .command, #selector(forwardCut)))
-        commands.append(keyCommand("v", .command, #selector(forwardPaste)))
-        return commands
     }
 
     private func keyCommand(
@@ -227,21 +233,6 @@ final class WebViewController: UIViewController {
             command.wantsPriorityOverSystemBehavior = true
         }
         return command
-    }
-
-    @objc private func forwardCopy() { forwardKey("c", "KeyC", 67) }
-    @objc private func forwardCut() { forwardKey("x", "KeyX", 88) }
-    @objc private func forwardPaste() { forwardKey("v", "KeyV", 86) }
-
-    /// Dispatch a Cmd-modified keydown into the page so VS Code's keybinding runs.
-    /// Our navigator.clipboard shim handles the actual read/write to UIPasteboard,
-    /// so this works without a user-gesture clipboard grant.
-    private func forwardKey(_ key: String, _ code: String, _ keyCode: Int) {
-        let js = """
-        window.__codeServerBridge && window.__codeServerBridge.dispatchKey(\
-        {key:'\(key)',code:'\(code)',keyCode:\(keyCode),meta:true})
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     @objc private func openSettings() {

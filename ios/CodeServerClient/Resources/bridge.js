@@ -116,8 +116,9 @@
     // reach VS Code. Kept here as the extension point for reclaiming any combo
     // iOS itself intercepts.
     dispatchKey: function (p) {
+      var target = document.activeElement || document.body
+      var info = target && target.tagName ? target.tagName.toLowerCase() : "none"
       try {
-        var target = document.activeElement || document.body
         var init = {
           key: p.key,
           code: p.code,
@@ -136,8 +137,9 @@
           target.dispatchEvent(event)
         })
       } catch (e) {
-        /* ignore */
+        info = "err:" + e
       }
+      return info
     },
   }
 })()

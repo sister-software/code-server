@@ -37,12 +37,20 @@ extension WKWebView {
     /// removing it means clearing the assistant item's button groups on the web
     /// content view. Re-apply on focus/keyboard-show since the content view can be
     /// recreated.
-    func clearInputAssistant() {
-        guard let contentView = scrollView.subviews.first(where: {
-            String(describing: type(of: $0)).hasPrefix("WKContent")
-        }) else { return }
+    @discardableResult
+    func clearInputAssistant() -> String {
+        func find(_ view: UIView) -> UIView? {
+            if String(describing: type(of: view)).hasPrefix("WKContentView") { return view }
+            for sub in view.subviews {
+                if let found = find(sub) { return found }
+            }
+            return nil
+        }
+        guard let contentView = find(self) else { return "no-content-view" }
         let item = contentView.inputAssistantItem
+        let before = item.leadingBarButtonGroups.count + item.trailingBarButtonGroups.count
         item.leadingBarButtonGroups = []
         item.trailingBarButtonGroups = []
+        return "\(type(of: contentView)) groups:\(before)->0 accessory:\(contentView.inputAccessoryView == nil ? "nil" : "set")"
     }
 }
