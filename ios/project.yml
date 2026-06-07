@@ -1,0 +1,30 @@
+name: CodeServerClient
+options:
+  bundleIdPrefix: software.sister
+  deploymentTarget:
+    iOS: "16.4"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  CodeServerClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: CodeServerClient
+        excludes:
+          - "Resources/bridge.js"
+      - path: CodeServerClient/Resources/bridge.js
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: software.sister.codeserverclient
+        PRODUCT_NAME: Code
+        INFOPLIST_FILE: CodeServerClient/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
