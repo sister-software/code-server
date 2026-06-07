@@ -33,6 +33,28 @@
         "command": "ipadFiles.openFolder",
         "title": "Open Local Folder…",
         "category": "iPad"
+      },
+      {
+        "command": "ipadFiles.copyLine",
+        "title": "Copy Line (empty selection)",
+        "category": "iPad"
+      },
+      {
+        "command": "ipadFiles.cutLine",
+        "title": "Cut Line (empty selection)",
+        "category": "iPad"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ipadFiles.copyLine",
+        "key": "cmd+c",
+        "when": "editorTextFocus && !editorHasSelection"
+      },
+      {
+        "command": "ipadFiles.cutLine",
+        "key": "cmd+x",
+        "when": "editorTextFocus && !editorHasSelection && !editorReadonly"
       }
     ]
   },
