@@ -49,14 +49,13 @@ final class RootViewController: UIViewController {
     private func presentConnection(animated: Bool) {
         guard presentedViewController == nil else { return }
         let vc = ConnectionViewController()
-        vc.onSave = { [weak self] url in
-            ConnectionStore.serverURL = url
+        vc.onConnect = { [weak self] url in
+            ConnectionStore.use(url)
             self?.dismiss(animated: true)
             self?.showWeb(url: url)
         }
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .formSheet
-        nav.isModalInPresentation = (ConnectionStore.serverURL == nil)
         present(nav, animated: animated)
     }
 }

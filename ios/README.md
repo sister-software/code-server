@@ -86,8 +86,17 @@ to inspect/step through `bridge.js` and the live VS Code page.
 
 ## Controls
 
-- **Cmd + Opt + ,** — open connection settings (avoids VS Code's `Cmd+,`).
-- **Two-finger long press** — open connection settings without a keyboard.
+- **Cmd + Opt + ,** — open the Servers list (avoids VS Code's `Cmd+,`).
+- **Cmd + Opt + R** — reload the page (avoids VS Code's `Cmd+R`).
+- **Two-finger long press** — action menu: Reload / Hard Reload / Servers.
+
+## Resilience
+
+- **Multiple servers** — the Servers list remembers known instances; tap to
+  switch, swipe to delete. The most-recently-used one loads on launch.
+- **Inline reconnect** — a load failure shows an in-place error surface (host +
+  reason) and auto-retries with exponential backoff (capped at 30s), with a
+  Retry Now button — no disruptive modal, no dead white screen.
 
 ## Roadmap
 

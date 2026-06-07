@@ -3,21 +3,26 @@ import WebKit
 
 /// Hosts the single, long-lived WKWebView pointed at code-server.
 ///
-/// v1 responsibilities:
+/// Responsibilities:
 ///   - Persistent web view (cookies/login survive relaunch via the default data store).
 ///   - Clipboard bridge: round-trips navigator.clipboard through UIPasteboard so
-///     copy/paste against the system clipboard actually works in WKWebView.
-///   - Jetsam recovery: when iOS kills the web content process, reload and restore
-///     state instead of leaving a dead white screen.
-///   - Keyboard: the web view stays first responder so hardware keystrokes flow to
-///     VS Code untouched (no Safari chrome to steal Cmd-W/T/N). The only native key
-///     command is a non-conflicting shortcut to reopen connection settings.
+///     copy/paste against the system clipboard works in WKWebView.
+///   - Jetsam recovery: when iOS kills the web content process, reload + restore.
+///   - Resilient loading: an inline error surface with automatic backoff retry,
+///     instead of a dead white screen or a disruptive modal alert.
+///   - Native action menu (Reload / Hard Reload / Servers) + keyboard shortcuts.
 final class WebViewController: UIViewController {
     private let url: URL
     private(set) var webView: WKWebView!
+    private let errorOverlay = ErrorOverlayView()
 
     /// Latest editor state captured before a likely jetsam, replayed after reload.
     private var pendingState: String?
+
+    /// Auto-retry backoff state.
+    private var retryAttempt = 0
+    private var retryWorkItem: DispatchWorkItem?
+    private let maxRetryDelay: TimeInterval = 30
 
     var onRequestSettings: (() -> Void)?
 
@@ -29,9 +34,16 @@ final class WebViewController: UIViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        retryWorkItem?.cancel()
+    }
+
     // MARK: - View
 
     override func loadView() {
+        let container = UIView()
+        container.backgroundColor = .systemBackground
+
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default() // persist cookies + login session
         config.allowsInlineMediaPlayback = true
@@ -45,30 +57,42 @@ final class WebViewController: UIViewController {
                 WKUserScript(source: bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false)
             )
         }
-        // Reply-capable handler lets navigator.clipboard.readText() await the
-        // native UIPasteboard value as a Promise.
         content.addScriptMessageHandler(self, contentWorld: .page, name: "clipboard")
         config.userContentController = content
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: container.bounds, configuration: config)
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.scrollView.keyboardDismissMode = .none
         if #available(iOS 16.4, *) {
             webView.isInspectable = true // debug the live page via Safari Web Inspector
         }
+        container.addSubview(webView)
         self.webView = webView
-        self.view = webView
+
+        errorOverlay.translatesAutoresizingMaskIntoConstraints = false
+        errorOverlay.isHidden = true
+        errorOverlay.onRetry = { [weak self] in self?.manualRetry() }
+        errorOverlay.onSettings = { [weak self] in self?.onRequestSettings?() }
+        container.addSubview(errorOverlay)
+        NSLayoutConstraint.activate([
+            errorOverlay.topAnchor.constraint(equalTo: container.topAnchor),
+            errorOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            errorOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            errorOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+
+        self.view = container
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         load()
 
-        // Keyboardless fallback to reach settings: two-finger long press.
+        // Keyboardless entry to the action menu: two-finger long press.
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.numberOfTouchesRequired = 2
         webView.addGestureRecognizer(longPress)
@@ -87,8 +111,46 @@ final class WebViewController: UIViewController {
         webView.load(request)
     }
 
-    func reloadFromOrigin() {
+    @objc func reloadPage() {
+        webView.reload()
+    }
+
+    /// Full reload from the origin URL (bypasses cache; also used for recovery).
+    func hardReload() {
         load()
+    }
+
+    // MARK: - Resilient loading (inline error + backoff)
+
+    private func showError(_ error: Error) {
+        let host = url.host ?? url.absoluteString
+        errorOverlay.show(host: host, message: error.localizedDescription)
+        view.bringSubviewToFront(errorOverlay)
+        scheduleAutoRetry()
+    }
+
+    private func scheduleAutoRetry() {
+        retryWorkItem?.cancel()
+        let delay = min(maxRetryDelay, pow(2.0, Double(retryAttempt)))
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.retryAttempt += 1
+            self.hardReload()
+        }
+        retryWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    @objc private func manualRetry() {
+        retryWorkItem?.cancel()
+        retryAttempt = 0
+        hardReload()
+    }
+
+    private func loadSucceeded() {
+        retryWorkItem?.cancel()
+        retryAttempt = 0
+        errorOverlay.hide()
     }
 
     // MARK: - State snapshot / restore (jetsam recovery)
@@ -111,20 +173,23 @@ final class WebViewController: UIViewController {
         )
     }
 
-    // MARK: - Settings entry points
+    // MARK: - Action menu / settings
 
     override var keyCommands: [UIKeyCommand]? {
-        // Cmd+Opt+, avoids VS Code's own Cmd+, (Settings).
-        let command = UIKeyCommand(
-            input: ",",
-            modifierFlags: [.command, .alternate],
-            action: #selector(openSettings)
-        )
-        command.discoverabilityTitle = "Connection Settings"
+        [
+            keyCommand(",", #selector(openSettings), title: "Servers"),
+            keyCommand("r", #selector(reloadPage), title: "Reload"),
+        ]
+    }
+
+    private func keyCommand(_ input: String, _ action: Selector, title: String) -> UIKeyCommand {
+        // Cmd+Opt+<key> avoids VS Code's own Cmd shortcuts (e.g. Cmd+, / Cmd+R).
+        let command = UIKeyCommand(input: input, modifierFlags: [.command, .alternate], action: action)
+        command.discoverabilityTitle = title
         if #available(iOS 15.0, *) {
             command.wantsPriorityOverSystemBehavior = true
         }
-        return [command]
+        return command
     }
 
     @objc private func openSettings() {
@@ -133,7 +198,23 @@ final class WebViewController: UIViewController {
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
-        onRequestSettings?()
+        showActionMenu(at: gesture.location(in: view))
+    }
+
+    private func showActionMenu(at point: CGPoint) {
+        guard presentedViewController == nil else { return }
+        let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in self?.reloadPage() })
+        sheet.addAction(UIAlertAction(title: "Hard Reload", style: .default) { [weak self] _ in self?.hardReload() })
+        sheet.addAction(UIAlertAction(title: "Servers…", style: .default) { [weak self] _ in self?.onRequestSettings?() })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        // iPad requires an anchor for action sheets.
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = view
+            popover.sourceRect = CGRect(origin: point, size: .zero)
+            popover.permittedArrowDirections = .any
+        }
+        present(sheet, animated: true)
     }
 
     // MARK: - Helpers
@@ -155,22 +236,6 @@ final class WebViewController: UIViewController {
         }
         return String(array.dropFirst().dropLast()) // strip the surrounding [ ]
     }
-
-    private func presentLoadError(_ error: Error) {
-        guard presentedViewController == nil else { return }
-        let alert = UIAlertController(
-            title: "Couldn’t connect",
-            message: error.localizedDescription,
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "Retry", style: .default) { [weak self] _ in
-            self?.reloadFromOrigin()
-        })
-        alert.addAction(UIAlertAction(title: "Settings", style: .cancel) { [weak self] _ in
-            self?.onRequestSettings?()
-        })
-        present(alert, animated: true)
-    }
 }
 
 // MARK: - Navigation / process lifecycle
@@ -178,11 +243,13 @@ final class WebViewController: UIViewController {
 extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.removeInputAccessoryView() // kill the floating prev/next + dictation bar
+        loadSucceeded()
         restoreStateIfNeeded()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        presentLoadError(error)
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        showError(error)
     }
 
     func webView(
@@ -190,14 +257,13 @@ extension WebViewController: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        // Ignore cancellations (e.g. redirects superseding a request).
         if (error as NSError).code == NSURLErrorCancelled { return }
-        presentLoadError(error)
+        showError(error)
     }
 
     // iOS killed the web content process under memory pressure — auto-recover.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        reloadFromOrigin()
+        hardReload()
     }
 
     // Dev convenience: trust self-signed certs from your own lab.
