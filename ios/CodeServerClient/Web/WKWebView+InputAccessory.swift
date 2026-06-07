@@ -30,4 +30,19 @@ extension WKWebView {
             }
         }
     }
+
+    /// Empties the iPad **input assistant** bar — the floating pill above/with the
+    /// keyboard holding the prev/next arrows + dictation mic. That bar comes from
+    /// `inputAssistantItem`, not `inputAccessoryView` (which defaults to nil), so
+    /// removing it means clearing the assistant item's button groups on the web
+    /// content view. Re-apply on focus/keyboard-show since the content view can be
+    /// recreated.
+    func clearInputAssistant() {
+        guard let contentView = scrollView.subviews.first(where: {
+            String(describing: type(of: $0)).hasPrefix("WKContent")
+        }) else { return }
+        let item = contentView.inputAssistantItem
+        item.leadingBarButtonGroups = []
+        item.trailingBarButtonGroups = []
+    }
 }

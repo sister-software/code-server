@@ -110,11 +110,22 @@ final class WebViewController: UIViewController {
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.numberOfTouchesRequired = 2
         webView.addGestureRecognizer(longPress)
+
+        // Strip the iPad input-assistant bar whenever the keyboard is about to show.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clearInputAssistant),
+            name: UIResponder.keyboardWillShowNotification, object: nil
+        )
+    }
+
+    @objc private func clearInputAssistant() {
+        webView.clearInputAssistant()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         webView.becomeFirstResponder()
+        webView.clearInputAssistant()
     }
 
     // MARK: - Loading
@@ -285,6 +296,7 @@ extension WebViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         loadSucceeded()
         restoreStateIfNeeded()
+        webView.clearInputAssistant()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
