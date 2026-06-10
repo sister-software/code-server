@@ -1,5 +1,5 @@
 import * as vscode from "vscode"
-import { base64ToBytes, bridge, BridgeResult, bytesToBase64 } from "./bridge"
+import { base64ToBytes, bridge, bridgeLog, BridgeResult, bytesToBase64 } from "./bridge"
 
 /// URIs look like `ipadfs:/<rootId>/relative/path`. The first path segment is the
 /// id of a native security-scoped bookmark; the rest is the path within it.
@@ -32,7 +32,9 @@ export class IpadFileSystemProvider implements vscode.FileSystemProvider {
 
   async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
     const { id, path } = split(uri)
+    bridgeLog(`stat ${uri.toString()} -> id=${id} path="${path}"`)
     const result = await bridge.request("stat", { id, path })
+    bridgeLog(`stat result ok=${result.ok} type=${result.type} status=${result.status}`)
     if (!result.ok) throw fail(result, uri)
     return {
       type: result.type === "directory" ? vscode.FileType.Directory : vscode.FileType.File,
@@ -44,7 +46,9 @@ export class IpadFileSystemProvider implements vscode.FileSystemProvider {
 
   async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
     const { id, path } = split(uri)
+    bridgeLog(`readDirectory ${uri.toString()}`)
     const result = await bridge.request("list", { id, path })
+    bridgeLog(`readDirectory result ok=${result.ok} entries=${(result.entries as unknown[])?.length} status=${result.status}`)
     if (!result.ok) throw fail(result, uri)
     const entries = (result.entries as { name: string; type: string }[]) ?? []
     return entries.map((entry): [string, vscode.FileType] => [

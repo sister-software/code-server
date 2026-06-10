@@ -1,4 +1,7 @@
+import os
 import WebKit
+
+private let fileLog = Logger(subsystem: "software.sister.codeserverclient", category: "files")
 
 /// Native endpoint for the `ipad-files` web extension's file operations.
 ///
@@ -35,6 +38,10 @@ final class FileBridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply 
         let path = params["path"] ?? ""
 
         switch op {
+        case "log":
+            fileLog.log("EXT: \(params["msg"] ?? "", privacy: .public)")
+            reply(["ok": true])
+            return
         case "pick-folder":
             store.pickFolder { result in
                 switch result {

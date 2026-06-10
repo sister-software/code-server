@@ -1,14 +1,18 @@
 import * as vscode from "vscode"
-import { bridge } from "./bridge"
+import { bridge, bridgeLog } from "./bridge"
 import { IpadFileSystemProvider } from "./fileSystemProvider"
 
 const SCHEME = "ipadfs"
 
 export function activate(context: vscode.ExtensionContext): void {
+  const folders = vscode.workspace.workspaceFolders?.map((f) => f.uri.toString()).join(", ") ?? "none"
+  bridgeLog(`activate; workspace folders=[${folders}]`)
+
   const provider = new IpadFileSystemProvider()
   context.subscriptions.push(
     vscode.workspace.registerFileSystemProvider(SCHEME, provider, { isCaseSensitive: true }),
   )
+  bridgeLog(`registered FileSystemProvider for ${SCHEME}`)
 
   // WebKit doesn't fire a `copy`/`cut` DOM event when there's no selection, so
   // VS Code's built-in empty-selection line copy/cut silently does nothing on
@@ -38,25 +42,55 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   )
 
+  // Asks the native wrapper to present the iOS document picker; returns the
+  // picked root's ipadfs URI and display name, or undefined on cancel/error.
+  async function pickLocalFolder(): Promise<{ uri: vscode.Uri; name: string } | undefined> {
+    const pick = await bridge.request("pick-folder")
+    bridgeLog(`pick result ok=${pick.ok} id=${pick.id} name=${pick.name} status=${pick.status}`)
+    if (!pick.ok) {
+      if (pick.status !== 499) {
+        // 499 = user cancelled the picker
+        vscode.window.showErrorMessage(`Pick Local Folder failed: ${pick.error ?? pick.status}`)
+      }
+      return undefined
+    }
+    return {
+      uri: vscode.Uri.parse(`${SCHEME}:/${pick.id as string}`),
+      name: (pick.name as string) || "iPad Folder",
+    }
+  }
+
+  // Replaces the current workspace with the picked folder. The workbench
+  // reloads; onFileSystem:ipadfs re-activates us so the provider is back
+  // before the new root resolves.
   context.subscriptions.push(
     vscode.commands.registerCommand("ipadFiles.openFolder", async () => {
       try {
-        // Asks the native wrapper to present the iOS document picker.
-        const pick = await bridge.request("pick-folder")
-        if (!pick.ok) {
-          if (pick.status !== 499) {
-            vscode.window.showErrorMessage(`Open Local Folder failed: ${pick.error ?? pick.status}`)
-          }
-          return // 499 = user cancelled the picker
-        }
-        const uri = vscode.Uri.parse(`${SCHEME}:/${pick.id as string}`)
-        const index = vscode.workspace.workspaceFolders?.length ?? 0
-        vscode.workspace.updateWorkspaceFolders(index, 0, {
-          uri,
-          name: (pick.name as string) || "iPad Folder",
-        })
+        const picked = await pickLocalFolder()
+        if (!picked) return
+        bridgeLog(`openFolder uri=${picked.uri.toString()}`)
+        await vscode.commands.executeCommand("vscode.openFolder", picked.uri)
       } catch (error) {
         vscode.window.showErrorMessage(`Open Local Folder failed: ${error}`)
+      }
+    }),
+  )
+
+  // Adds the picked folder alongside the current workspace folders.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ipadFiles.addFolder", async () => {
+      try {
+        const picked = await pickLocalFolder()
+        if (!picked) return
+        const index = vscode.workspace.workspaceFolders?.length ?? 0
+        bridgeLog(`adding workspace folder uri=${picked.uri.toString()} at index=${index}`)
+        const added = vscode.workspace.updateWorkspaceFolders(index, 0, {
+          uri: picked.uri,
+          name: picked.name,
+        })
+        bridgeLog(`updateWorkspaceFolders returned ${added}; count now=${vscode.workspace.workspaceFolders?.length}`)
+      } catch (error) {
+        vscode.window.showErrorMessage(`Add Local Folder failed: ${error}`)
       }
     }),
   )

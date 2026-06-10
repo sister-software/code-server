@@ -69,6 +69,12 @@ class Bridge {
 
 export const bridge = new Bridge()
 
+/// Fire-and-forget diagnostic log routed to the native os_log (category "files"),
+/// since the web-worker extension host's console isn't in the device syslog.
+export function bridgeLog(message: string): void {
+  bridge.request("log", { msg: message }).catch(() => undefined)
+}
+
 // --- base64 helpers (binary read/write stays within message-reply types) -----
 
 export function bytesToBase64(bytes: Uint8Array): string {
