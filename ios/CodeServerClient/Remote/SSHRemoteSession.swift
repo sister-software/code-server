@@ -36,6 +36,7 @@ final class SSHRemoteSession {
         case serverDidNotStart(String)
         case channelSetupFailed
         case authenticationFailed(String)
+        case hostKeyMismatch(host: String)
 
         var errorDescription: String? {
             switch self {
@@ -45,6 +46,8 @@ final class SSHRemoteSession {
                 return "SSH channel setup failed"
             case .authenticationFailed(let detail):
                 return "SSH authentication failed — check the password, and that the server allows password auth (sshd PasswordAuthentication yes).\n\(detail)"
+            case .hostKeyMismatch(let host):
+                return "Host key for \(host) CHANGED since first connect. If the server was legitimately rekeyed, re-save the address (Change Address… → Save) to forget the pinned key. Otherwise, someone may be intercepting the connection."
             }
         }
     }
@@ -52,17 +55,30 @@ final class SSHRemoteSession {
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private var sshChannel: Channel?
     private var listenerChannel: Channel?
+    private var stopped = false
+
+    /// Fired (on an arbitrary thread) when the SSH connection drops for any
+    /// reason other than an explicit stop() — the hook for auto-reconnect.
+    var onUnexpectedClose: (() -> Void)?
+
+    var isClosed: Bool { sshChannel?.isActive != true }
 
     deinit { stop() }
 
     func stop() {
-        try? listenerChannel?.close().wait()
-        try? sshChannel?.close().wait()
+        stopped = true
+        listenerChannel?.close(promise: nil)
+        sshChannel?.close(promise: nil)
         listenerChannel = nil
         sshChannel = nil
     }
 
-    func start(config: Config, vscodeCommit: String, progress: @escaping (String) -> Void) async throws -> Ready {
+    func start(
+        config: Config,
+        vscodeCommit: String,
+        preferredLocalPort: Int? = nil,
+        progress: @escaping (String) -> Void
+    ) async throws -> Ready {
         progress("Connecting to \(config.host):\(config.port)…")
         let authPromise = group.next().makePromise(of: Void.self)
         let ssh: Channel
@@ -78,11 +94,16 @@ final class SSHRemoteSession {
         try await authPromise.futureResult.get()
         progress("SSH authenticated — starting vscode-server…")
 
+        ssh.closeFuture.whenComplete { [weak self] _ in
+            guard let self, !self.stopped else { return }
+            self.onUnexpectedClose?()
+        }
+
         let token = UUID().uuidString
         let remotePort = try await bootstrapServer(ssh: ssh, commit: vscodeCommit, token: token, progress: progress)
 
         progress("Opening tunnel…")
-        let localPort = try await startForwarder(ssh: ssh, remotePort: remotePort)
+        let localPort = try await startForwarder(ssh: ssh, remotePort: remotePort, preferredLocalPort: preferredLocalPort)
         return Ready(localPort: localPort, connectionToken: token)
     }
 
@@ -91,7 +112,7 @@ final class SSHRemoteSession {
     private func connect(config: Config, authPromise: EventLoopPromise<Void>) async throws -> Channel {
         let clientConfig = SSHClientConfiguration(
             userAuthDelegate: PasswordAuthDelegate(username: config.username, password: config.password),
-            serverAuthDelegate: AcceptAllHostKeysDelegate()
+            serverAuthDelegate: TrustOnFirstUseHostKeysDelegate(host: config.host, port: config.port)
         )
         return try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -153,10 +174,13 @@ final class SSHRemoteSession {
 
     // MARK: - Local forwarder (loopback TCP -> SSH direct-tcpip)
 
-    private func startForwarder(ssh: Channel, remotePort: Int) async throws -> Int {
+    private func startForwarder(ssh: Channel, remotePort: Int, preferredLocalPort: Int? = nil) async throws -> Int {
         let sshHandler = try await ssh.pipeline.handler(type: NIOSSHHandler.self).get()
 
-        let listener = try await ServerBootstrap(group: group)
+        // Reusing the previous port across reconnects keeps the page's
+        // remoteAuthority valid, so the workbench's own reconnect banner can
+        // resume the session without a reload. Fall back to an ephemeral port.
+        let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { local in
                 let (localGlue, sshGlue) = GlueHandler.matchedPair()
@@ -179,8 +203,14 @@ final class SSHRemoteSession {
                     return local.eventLoop.makeSucceededVoidFuture()
                 }
             }
-            .bind(host: "127.0.0.1", port: 0)
-            .get()
+
+        let listener: Channel
+        if let preferred = preferredLocalPort,
+           let reuse = try? await bootstrap.bind(host: "127.0.0.1", port: preferred).get() {
+            listener = reuse
+        } else {
+            listener = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
+        }
 
         listenerChannel = listener
         guard let port = listener.localAddress?.port else { throw SSHError.channelSetupFailed }
@@ -280,11 +310,28 @@ private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate
     }
 }
 
-/// v1 trusts any host key (personal lab over Tailscale). TODO: trust-on-first-
-/// use with a stored fingerprint before this touches anything less private.
-private final class AcceptAllHostKeysDelegate: NIOSSHClientServerAuthenticationDelegate {
+/// Trust-on-first-use: pin the first key each host presents, reject changes.
+private final class TrustOnFirstUseHostKeysDelegate: NIOSSHClientServerAuthenticationDelegate {
+    private let host: String
+    private let port: Int
+
+    init(host: String, port: Int) {
+        self.host = host
+        self.port = port
+    }
+
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        validationCompletePromise.succeed(())
+        let presented = String(openSSHPublicKey: hostKey)
+        guard let pinned = HostKeyStore.stored(host: host, port: port) else {
+            HostKeyStore.store(presented, host: host, port: port)
+            validationCompletePromise.succeed(())
+            return
+        }
+        if pinned == presented {
+            validationCompletePromise.succeed(())
+        } else {
+            validationCompletePromise.fail(SSHRemoteSession.SSHError.hostKeyMismatch(host: host))
+        }
     }
 }
 

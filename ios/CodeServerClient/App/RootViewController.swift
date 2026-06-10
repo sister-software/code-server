@@ -6,12 +6,30 @@ final class RootViewController: UIViewController {
     private var webVC: WebViewController?
     private var sshSession: SSHRemoteSession?
 
+    /// Last successful SSH connection, for silent (device-key) reconnects after
+    /// the tunnel dies — iOS kills sockets whenever the app is suspended.
+    private var sshReconnect: (target: String, localPort: Int)?
+    private var sshReconnecting = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         if let url = ConnectionStore.serverURL {
             showWeb(url: url)
         }
+        // iOS suspension kills the SSH tunnel; try a silent key-based
+        // reconnect when the app returns, so the workbench's own reconnect
+        // banner finds the same forwarded port alive again.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(reconnectSSHIfNeeded),
+            name: UIApplication.willEnterForegroundNotification, object: nil
+        )
+    }
+
+    @objc private func reconnectSSHIfNeeded() {
+        guard let reconnect = sshReconnect, !sshReconnecting else { return }
+        guard sshSession == nil || sshSession?.isClosed != false else { return }
+        connectSSH(target: reconnect.target, password: "", silent: true, preferredLocalPort: reconnect.localPort)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -50,43 +68,73 @@ final class RootViewController: UIViewController {
     /// The Remote-SSH dance, natively: SSH in, bootstrap the official
     /// vscode-server at our workbench's commit, tunnel it to loopback, then
     /// boot the local workbench attached to it as its remote.
-    private func connectSSH(target: String, password: String) {
+    ///
+    /// `silent` is the auto-reconnect mode: device-key auth only, no dialogs,
+    /// reuse the previous forwarded port so the page's remoteAuthority stays
+    /// valid and the workbench resumes without a reload.
+    private func connectSSH(target: String, password: String, silent: Bool = false, preferredLocalPort: Int? = nil) {
         guard let parsed = ConnectionStore.parseSSHTarget(target) else { return }
         guard let commit = WorkbenchServer.vscodeCommit else {
             showSSHError("Missing ios-commit.txt in the app bundle — re-run fetch-vscode-web.sh.")
             return
         }
 
-        let progressAlert = UIAlertController(title: "SSH Remote", message: "Connecting…", preferredStyle: .alert)
-        present(progressAlert, animated: true)
+        var progressAlert: UIAlertController?
+        if !silent {
+            let alert = UIAlertController(title: "SSH Remote", message: "Connecting…", preferredStyle: .alert)
+            present(alert, animated: true)
+            progressAlert = alert
+        }
 
+        sshReconnecting = true
         sshSession?.stop()
         let session = SSHRemoteSession()
         sshSession = session
 
         Task { @MainActor in
+            defer { sshReconnecting = false }
             do {
                 let ready = try await session.start(
                     config: .init(host: parsed.host, port: parsed.port, username: parsed.user, password: password),
                     vscodeCommit: commit,
+                    preferredLocalPort: preferredLocalPort,
                     progress: { message in
-                        DispatchQueue.main.async { progressAlert.message = message }
+                        DispatchQueue.main.async { progressAlert?.message = message }
                     }
                 )
+                session.onUnexpectedClose = { [weak self] in
+                    DispatchQueue.main.async { self?.reconnectSSHIfNeeded() }
+                }
                 WorkbenchServer.shared.remote = .init(
                     authority: "localhost:\(ready.localPort)",
                     connectionToken: ready.connectionToken
                 )
-                progressAlert.dismiss(animated: true) { [weak self] in
+                sshReconnect = (target, ready.localPort)
+
+                if silent, ready.localPort == preferredLocalPort {
+                    // Same authority, live tunnel: the page's own reconnect
+                    // flow picks the session back up — nothing else to do.
+                    return
+                }
+                let finish = { [weak self] in
                     ConnectionStore.use(WorkbenchServer.localURL)
                     self?.showWeb(url: WorkbenchServer.localURL)
+                }
+                if let progressAlert {
+                    progressAlert.dismiss(animated: true, completion: finish)
+                } else {
+                    finish()
                 }
             } catch {
                 self.sshSession?.stop()
                 self.sshSession = nil
-                progressAlert.dismiss(animated: true) { [weak self] in
-                    self?.showSSHError(String(describing: error))
+                if let progressAlert {
+                    progressAlert.dismiss(animated: true) { [weak self] in
+                        self?.showSSHError(String(describing: error))
+                    }
                 }
+                // Silent reconnect failures stay quiet: the workbench shows its
+                // own disconnected banner, and Servers offers manual reconnect.
             }
         }
     }
@@ -106,6 +154,7 @@ final class RootViewController: UIViewController {
             // any previous SSH session so the local workbench boots standalone.
             self.sshSession?.stop()
             self.sshSession = nil
+            self.sshReconnect = nil
             WorkbenchServer.shared.remote = nil
             ConnectionStore.use(url)
             self.dismiss(animated: true)

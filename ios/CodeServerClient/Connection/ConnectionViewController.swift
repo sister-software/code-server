@@ -178,7 +178,9 @@ final class ConnectionViewController: UITableViewController {
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
             guard let text = alert?.textFields?.first?.text,
-                  ConnectionStore.parseSSHTarget(text) != nil else { return }
+                  let parsed = ConnectionStore.parseSSHTarget(text) else { return }
+            // Re-saving doubles as "forget the pinned host key" (e.g. rekeyed server).
+            HostKeyStore.forget(host: parsed.host, port: parsed.port)
             ConnectionStore.sshTarget = text.trimmingCharacters(in: .whitespacesAndNewlines)
             self?.tableView.reloadData()
             self?.promptPassword(target: ConnectionStore.sshTarget!)
