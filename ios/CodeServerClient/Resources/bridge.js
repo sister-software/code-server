@@ -48,11 +48,11 @@
     },
   }
 
-  // Preserve richer APIs (ClipboardItem read/write, events) if WebKit exposes them.
+  // Preserve richer APIs (ClipboardItem read, events) if WebKit exposes them.
+  var existing = null
   try {
-    var existing = navigator.clipboard
+    existing = navigator.clipboard
     if (existing) {
-      if (typeof existing.write === "function") shim.write = existing.write.bind(existing)
       if (typeof existing.read === "function") shim.read = existing.read.bind(existing)
       if (typeof existing.addEventListener === "function")
         shim.addEventListener = existing.addEventListener.bind(existing)
@@ -61,6 +61,47 @@
     }
   } catch (e) {
     /* ignore */
+  }
+
+  // Resolves a ClipboardItem's text/plain payload (string), or null if it has
+  // none. The payload may itself be a pending promise (VS Code's gesture
+  // workaround passes one), so this settles only when that does.
+  function itemText(item) {
+    if (!item || typeof item.getType !== "function") return Promise.resolve(null)
+    var types = item.types || []
+    if (Array.prototype.indexOf.call(types, "text/plain") === -1) return Promise.resolve(null)
+    return item.getType("text/plain").then(function (blob) {
+      if (typeof blob === "string") return blob
+      if (blob && typeof blob.text === "function") return blob.text()
+      return null
+    })
+  }
+
+  // clipboard.write() must ALSO go through UIPasteboard, not just writeText():
+  // VS Code detects WebKit (BrowserClipboardService.installWebKitWriteTextWorkaround)
+  // and routes every writeText through a ClipboardItem armed on click/keydown to
+  // satisfy Safari's user-gesture rule — bypassing our writeText shim. WebKit's
+  // async ClipboardItem write also eats the trailing newline of line-copies.
+  // Unwrap text/plain items and write them verbatim; delegate anything else
+  // (e.g. images) to the real clipboard.
+  shim.write = function (items) {
+    var list = Array.prototype.slice.call(items || [])
+    return Promise.all(list.map(itemText)).then(
+      function (texts) {
+        for (var i = 0; i < texts.length; i++) {
+          if (typeof texts[i] === "string") return nativeWrite(texts[i])
+        }
+        if (existing && typeof existing.write === "function") {
+          return existing.write.call(existing, items)
+        }
+        throw new DOMException("clipboard write not supported", "NotAllowedError")
+      },
+      function () {
+        // The armed write was superseded by a newer gesture; VS Code expects a
+        // NotAllowedError-shaped rejection here and silently ignores it.
+        throw new DOMException("clipboard write superseded", "NotAllowedError")
+      },
+    )
   }
 
   try {

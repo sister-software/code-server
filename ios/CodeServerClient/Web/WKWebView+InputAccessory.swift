@@ -31,12 +31,44 @@ extension WKWebView {
         }
     }
 
-    /// Empties the iPad **input assistant** bar — the floating pill above/with the
-    /// keyboard holding the prev/next arrows + dictation mic. That bar comes from
-    /// `inputAssistantItem`, not `inputAccessoryView` (which defaults to nil), so
-    /// removing it means clearing the assistant item's button groups on the web
-    /// content view. Re-apply on focus/keyboard-show since the content view can be
-    /// recreated.
+    /// Neutralizes the iPad **input assistant** bar at the class level: overrides
+    /// `inputAssistantItem` on `WKContentView` so its button groups are emptied
+    /// every time the system fetches the item to assemble the bar.
+    ///
+    /// Instance-level clearing (see `clearInputAssistant`) is timing-dependent:
+    /// focusing the editor purely via hardware keys (e.g. arrow keys on a fresh
+    /// page, no touch) builds the bar before any keyboard notification lets us
+    /// clear it. The class override has no such window.
+    static func disableInputAssistantGlobally() {
+        guard let contentViewClass = NSClassFromString("WKContentView") else { return }
+        let selector = #selector(getter: UIResponder.inputAssistantItem)
+        guard let template = class_getInstanceMethod(UIResponder.self, selector) else { return }
+
+        // Call through to the inherited getter (the item is stored per responder),
+        // then strip its groups before handing it back.
+        typealias Getter = @convention(c) (AnyObject, Selector) -> UITextInputAssistantItem
+        let original = unsafeBitCast(method_getImplementation(template), to: Getter.self)
+        let block: @convention(block) (AnyObject) -> UITextInputAssistantItem = { receiver in
+            let item = original(receiver, selector)
+            item.leadingBarButtonGroups = []
+            item.trailingBarButtonGroups = []
+            return item
+        }
+        let implementation = imp_implementationWithBlock(block)
+        let typeEncoding = method_getTypeEncoding(template)
+
+        // Add as an override on WKContentView only — never touch UIResponder's
+        // own method, which every responder in the app inherits.
+        if !class_addMethod(contentViewClass, selector, implementation, typeEncoding) {
+            if let existing = class_getInstanceMethod(contentViewClass, selector) {
+                method_setImplementation(existing, implementation)
+            }
+        }
+    }
+
+    /// Instance-level backstop for an assistant bar that already materialized:
+    /// empties the content view's assistant groups and forces the system to
+    /// rebuild input views so a visible bar is torn down, not just orphaned.
     @discardableResult
     func clearInputAssistant() -> String {
         func find(_ view: UIView) -> UIView? {
@@ -51,6 +83,9 @@ extension WKWebView {
         let before = item.leadingBarButtonGroups.count + item.trailingBarButtonGroups.count
         item.leadingBarButtonGroups = []
         item.trailingBarButtonGroups = []
+        if contentView.isFirstResponder {
+            contentView.reloadInputViews()
+        }
         return "\(type(of: contentView)) groups:\(before)->0 accessory:\(contentView.inputAccessoryView == nil ? "nil" : "set")"
     }
 }

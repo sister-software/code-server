@@ -8,6 +8,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         WKWebView.disableInputAccessoryViewGlobally()
+        WKWebView.disableInputAssistantGlobally()
         return true
     }
 

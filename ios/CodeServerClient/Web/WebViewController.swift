@@ -80,6 +80,7 @@ final class WebViewController: UIViewController {
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.delegate = self // pin the viewport; see UIScrollViewDelegate below
         if #available(iOS 16.4, *) {
             webView.isInspectable = true // debug the live page via Safari Web Inspector
         }
@@ -120,11 +121,14 @@ final class WebViewController: UIViewController {
         longPress.numberOfTouchesRequired = 2
         webView.addGestureRecognizer(longPress)
 
-        // Strip the iPad input-assistant bar whenever the keyboard is about to show.
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(clearInputAssistant),
-            name: UIResponder.keyboardWillShowNotification, object: nil
-        )
+        // Strip the iPad input-assistant bar whenever keyboard chrome appears.
+        // willChangeFrame covers the hardware-keyboard assistant strip, which can
+        // come up without a willShow (e.g. arrow-key focus with no prior touch).
+        for name in [UIResponder.keyboardWillShowNotification, UIResponder.keyboardWillChangeFrameNotification] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clearInputAssistant), name: name, object: nil
+            )
+        }
     }
 
     @objc private func clearInputAssistant() {
@@ -339,6 +343,24 @@ extension WebViewController: WKUIDelegate {
             webView.load(navigationAction.request)
         }
         return nil
+    }
+}
+
+// MARK: - Viewport pinning
+//
+// VS Code is a fixed-layout app: its document never legitimately scrolls (all
+// scrolling happens inside the page). WKWebView still auto-scrolls its outer
+// scroll view to reveal the focused element when keyboard/input-assistant
+// geometry changes (Monaco's hidden textarea follows the caret), which shows up
+// as the whole viewport "jumping". Pinning the offset makes those adjustments
+// no-ops. (WKWebView forwards scroll-view delegate callbacks alongside its
+// internal handling, so setting the delegate is supported.)
+
+extension WebViewController: UIScrollViewDelegate {
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if scrollView.contentOffset != .zero {
+            scrollView.contentOffset = .zero
+        }
     }
 }
 
