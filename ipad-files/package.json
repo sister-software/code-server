@@ -2,7 +2,7 @@
   "name": "ipad-files",
   "displayName": "iPad Local Files",
   "description": "Browse and edit iPad/iCloud local files in code-server, bridged through the native iOS wrapper.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "sister-software",
   "private": true,
   "license": "MIT",

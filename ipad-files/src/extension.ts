@@ -16,13 +16,31 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // WebKit doesn't fire a `copy`/`cut` DOM event when there's no selection, so
   // VS Code's built-in empty-selection line copy/cut silently does nothing on
-  // iPad. These keybindings (active only when the selection is empty) reproduce
-  // it through the VS Code API + clipboard, which the native wrapper bridges to
-  // UIPasteboard.
+  // iPad. These keybindings (active only when the selection is empty) ask the
+  // wrapper's bridge.js to dispatch a synthetic copy/cut event at Monaco's
+  // textarea: VS Code's real handler then performs the line copy/cut AND stores
+  // the in-memory metadata that makes paste insert line-above (desktop
+  // semantics). Without the wrapper (desktop browser, relay absent) we fall
+  // back to a plain clipboard write: correct content, paste lands at the cursor.
+  let editorBridgeAvailable: boolean | undefined
+
+  async function syntheticEditorClipboard(op: "editor-copy" | "editor-cut"): Promise<boolean> {
+    if (editorBridgeAvailable === false) return false
+    try {
+      const result = await bridge.request(op, {}, undefined, 1_000)
+      editorBridgeAvailable = true
+      return result.ok === true
+    } catch {
+      editorBridgeAvailable = false // relay missing; don't pay the wait again
+      return false
+    }
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("ipadFiles.copyLine", async () => {
       const editor = vscode.window.activeTextEditor
       if (!editor) return
+      if (await syntheticEditorClipboard("editor-copy")) return
       const line = editor.document.lineAt(editor.selection.active.line)
       const eol = editor.document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n"
       await vscode.env.clipboard.writeText(line.text + eol)
@@ -33,6 +51,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("ipadFiles.cutLine", async () => {
       const editor = vscode.window.activeTextEditor
       if (!editor) return
+      // The synthetic cut also triggers the editor's own line deletion.
+      if (await syntheticEditorClipboard("editor-cut")) return
       const lineNumber = editor.selection.active.line
       const line = editor.document.lineAt(lineNumber)
       const eol = editor.document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n"

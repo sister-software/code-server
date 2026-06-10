@@ -204,10 +204,60 @@
     window.webkit.messageHandlers.fileBridge
   if (!fileBridge) return
 
+  var clipboard =
+    window.webkit.messageHandlers && window.webkit.messageHandlers.clipboard
+
+  // Synthetic editor copy/cut. WebKit never fires the DOM copy/cut events on a
+  // collapsed selection, so VS Code's built-in empty-selection line copy is dead
+  // on iPad. Dispatching a synthetic ClipboardEvent at Monaco's hidden textarea
+  // runs VS Code's REAL copy handler — which computes the line copy, writes it
+  // into our constructed DataTransfer, and stores the in-memory paste metadata
+  // that makes a later paste insert line-above (desktop semantics). Cut also
+  // schedules the editor's own line deletion. We then push the harvested text
+  // into UIPasteboard. The ipad-files extension invokes this and falls back to a
+  // plain env.clipboard write if it fails.
+  function syntheticEditorClipboard(op) {
+    var target = document.activeElement
+    if (!target || target.tagName !== "TEXTAREA") {
+      return { ok: false, status: 404, error: "no editor textarea focused" }
+    }
+    var data = new DataTransfer()
+    var event = new ClipboardEvent(op === "editor-cut" ? "cut" : "copy", {
+      clipboardData: data,
+      bubbles: true,
+      cancelable: true,
+    })
+    target.dispatchEvent(event)
+    var text = data.getData("text/plain")
+    if (!text) return { ok: false, status: 404, error: "editor produced no clipboard data" }
+    if (!clipboard) return { ok: false, status: 503, error: "clipboard handler unavailable" }
+    return clipboard.postMessage({ action: "write", text: text }).then(function () {
+      return { ok: true, length: text.length }
+    })
+  }
+
   var channel = new BroadcastChannel("ipadfs-bridge")
   channel.onmessage = function (event) {
     var msg = event.data
     if (!msg || typeof msg.reqId !== "string" || !msg.op) return // ignore responses/noise
+    if (msg.op === "editor-copy" || msg.op === "editor-cut") {
+      Promise.resolve()
+        .then(function () {
+          return syntheticEditorClipboard(msg.op)
+        })
+        .then(
+          function (result) {
+            channel.postMessage({ reqId: msg.reqId, result: result })
+          },
+          function (error) {
+            channel.postMessage({
+              reqId: msg.reqId,
+              result: { ok: false, status: 500, error: String(error) },
+            })
+          },
+        )
+      return
+    }
     fileBridge
       .postMessage({ op: msg.op, params: msg.params || {}, data: msg.bodyBase64 || null })
       .then(

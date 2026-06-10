@@ -54,13 +54,14 @@ class Bridge {
     op: string,
     params: Record<string, string> = {},
     bodyBase64?: string,
+    timeoutMs: number = TIMEOUT_MS,
   ): Promise<BridgeResult> {
     const reqId = `${this.seq++}-${Math.random().toString(36).slice(2)}`
     return new Promise<BridgeResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(reqId)
         reject(new BridgeError(504, `bridge timeout for "${op}" (is the iOS wrapper connected?)`))
-      }, TIMEOUT_MS)
+      }, timeoutMs)
       this.pending.set(reqId, { resolve, reject, timer })
       this.channel.postMessage({ reqId, op, params, bodyBase64 })
     })
