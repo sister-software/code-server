@@ -241,10 +241,13 @@ private final class AuthStateHandler: ChannelInboundHandler {
 
 // MARK: - Auth delegates
 
+/// Offers the device's ed25519 key first (add its public half to
+/// authorized_keys), then the password if one was entered.
 private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate {
     private let username: String
     private let password: String
-    private var attempted = false
+    private var triedKey = false
+    private var triedPassword = false
 
     init(username: String, password: String) {
         self.username = username
@@ -255,16 +258,25 @@ private final class PasswordAuthDelegate: NIOSSHClientUserAuthenticationDelegate
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
     ) {
-        guard availableMethods.contains(.password), !attempted else {
-            nextChallengePromise.succeed(nil) // no more offers -> auth failure
+        if availableMethods.contains(.publicKey), !triedKey {
+            triedKey = true
+            nextChallengePromise.succeed(NIOSSHUserAuthenticationOffer(
+                username: username,
+                serviceName: "",
+                offer: .privateKey(.init(privateKey: NIOSSHPrivateKey(ed25519Key: DeviceSSHKey.privateKey())))
+            ))
             return
         }
-        attempted = true
-        nextChallengePromise.succeed(NIOSSHUserAuthenticationOffer(
-            username: username,
-            serviceName: "",
-            offer: .password(.init(password: password))
-        ))
+        if availableMethods.contains(.password), !triedPassword, !password.isEmpty {
+            triedPassword = true
+            nextChallengePromise.succeed(NIOSSHUserAuthenticationOffer(
+                username: username,
+                serviceName: "",
+                offer: .password(.init(password: password))
+            ))
+            return
+        }
+        nextChallengePromise.succeed(nil) // no more offers -> auth failure
     }
 }
 

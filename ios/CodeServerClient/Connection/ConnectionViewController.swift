@@ -187,12 +187,20 @@ final class ConnectionViewController: UITableViewController {
     }
 
     private func promptPassword(target: String) {
-        let alert = UIAlertController(title: "Connect to \(target)", message: nil, preferredStyle: .alert)
+        let alert = UIAlertController(
+            title: "Connect to \(target)",
+            message: "Uses this iPad's SSH key if the server knows it; otherwise enter a password. Copy Public Key → append to ~/.ssh/authorized_keys for passwordless logins.",
+            preferredStyle: .alert
+        )
         alert.addTextField { field in
-            field.placeholder = "Password"
+            field.placeholder = "Password (optional with key)"
             field.isSecureTextEntry = true
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Copy Public Key", style: .default) { [weak self] _ in
+            UIPasteboard.general.string = DeviceSSHKey.publicKeyOpenSSH()
+            self?.promptPassword(target: target) // re-present; copying shouldn't end the flow
+        })
         alert.addAction(UIAlertAction(title: "Change Address…", style: .default) { [weak self] _ in
             self?.promptSSHTarget()
         })
