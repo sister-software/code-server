@@ -9,6 +9,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         WKWebView.disableInputAccessoryViewGlobally()
         WKWebView.disableInputAssistantGlobally()
+        WorkbenchServer.shared.startIfNeeded()
         return true
     }
 

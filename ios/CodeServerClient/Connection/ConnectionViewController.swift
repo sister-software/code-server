@@ -6,6 +6,7 @@ final class ConnectionViewController: UITableViewController {
     var onConnect: ((URL) -> Void)?
 
     private enum Section: Int, CaseIterable {
+        case local
         case add
         case servers
     }
@@ -61,6 +62,7 @@ final class ConnectionViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
+        case .local: return "This iPad"
         case .add: return "Add a server"
         case .servers: return servers.isEmpty ? nil : "Saved"
         }
@@ -68,6 +70,7 @@ final class ConnectionViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
+        case .local: return "VS Code running entirely on this iPad — works offline, edits local folders."
         case .add: return "Reach your home lab over Tailscale. http and self-signed certificates are accepted."
         case .servers: return nil
         }
@@ -75,6 +78,7 @@ final class ConnectionViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
+        case .local: return 1
         case .add: return 1
         case .servers: return servers.count
         }
@@ -87,6 +91,10 @@ final class ConnectionViewController: UITableViewController {
         cell.textLabel?.text = nil
 
         switch Section(rawValue: indexPath.section)! {
+        case .local:
+            cell.textLabel?.text = "Local Workbench"
+            cell.accessoryType = (current == WorkbenchServer.localURL) ? .checkmark : .none
+            cell.selectionStyle = .default
         case .add:
             let field = makeAddField()
             cell.contentView.addSubview(field)
@@ -128,8 +136,14 @@ final class ConnectionViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard Section(rawValue: indexPath.section) == .servers else { return }
-        onConnect?(servers[indexPath.row])
+        switch Section(rawValue: indexPath.section)! {
+        case .local:
+            onConnect?(WorkbenchServer.localURL)
+        case .servers:
+            onConnect?(servers[indexPath.row])
+        case .add:
+            break
+        }
     }
 
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {

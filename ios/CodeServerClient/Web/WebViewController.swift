@@ -51,6 +51,14 @@ final class WebViewController: UIViewController {
         config.allowsInlineMediaPlayback = true
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
+        // The local workbench opts into app-bound mode: that's what unlocks
+        // service workers (required by VS Code webviews) in WKWebView. Remote
+        // views must NOT opt in — app-bound navigation limits would block SSO
+        // redirects (e.g. Cloudflare Access).
+        if let host = url.host, host == "localhost" || host == "127.0.0.1" {
+            config.limitsNavigationsToAppBoundDomains = true
+        }
+
         let content = WKUserContentController()
         if let bridge = Self.loadBridgeScript() {
             // forMainFrameOnly: false so the shim also loads inside VS Code's
@@ -254,6 +262,7 @@ final class WebViewController: UIViewController {
         sheet.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in self?.reloadPage() })
         sheet.addAction(UIAlertAction(title: "Hard Reload", style: .default) { [weak self] _ in self?.hardReload() })
         sheet.addAction(UIAlertAction(title: "Servers…", style: .default) { [weak self] _ in self?.onRequestSettings?() })
+        sheet.addAction(UIAlertAction(title: "Diagnostics", style: .default) { [weak self] _ in self?.showDiagnostics() })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         // iPad requires an anchor for action sheets.
         if let popover = sheet.popoverPresentationController {
@@ -262,6 +271,48 @@ final class WebViewController: UIViewController {
             popover.permittedArrowDirections = .any
         }
         present(sheet, animated: true)
+    }
+
+    /// Page-state snapshot shown in an alert — our only "console" on device
+    /// (os_log/NSLog don't reliably reach idevicesyslog, and Web Inspector
+    /// needs a tethered Mac with Safari open).
+    private func showDiagnostics() {
+        let js = """
+        const sw = navigator.serviceWorker
+        const iframes = Array.from(document.querySelectorAll('iframe')).map(f => (f.src || f.name || '?').slice(0, 100))
+        let extHostFetch = 'n/a'
+        try {
+          const probe = await fetch('/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html', { cache: 'no-store' })
+          extHostFetch = probe.status
+        } catch (e) { extHostFetch = String(e).slice(0, 80) }
+        let swRegs = 'n/a'
+        try { swRegs = sw ? (await sw.getRegistrations()).length : 'no sw' } catch (e) { swRegs = String(e).slice(0, 80) }
+        return JSON.stringify({
+          url: location.href.slice(0, 100),
+          secureContext: window.isSecureContext,
+          cryptoSubtle: !!(crypto && crypto.subtle),
+          serviceWorker: !!sw,
+          swRegistrations: swRegs,
+          extHostIframeFetch: extHostFetch,
+          iframes: iframes,
+          workbench: !!document.querySelector('.monaco-workbench'),
+          bridgeInstalled: !!window.__codeServerBridgeInstalled,
+          online: navigator.onLine,
+        }, null, 1)
+        """
+        webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] result in
+            let message: String
+            switch result {
+            case .success(let value): message = (value as? String) ?? String(describing: value)
+            case .failure(let error): message = "error: \(error)"
+            }
+            let alert = UIAlertController(title: "Diagnostics", message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Copy", style: .default) { _ in
+                UIPasteboard.general.string = message
+            })
+            alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+            self?.present(alert, animated: true)
+        }
     }
 
     // MARK: - Helpers

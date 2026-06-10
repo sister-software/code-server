@@ -31,6 +31,14 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- WKWebView only enables service workers for app-bound domains; the local
+	     workbench needs one for VS Code webviews (markdown preview etc.). Only
+	     the local web view opts in via limitsNavigationsToAppBoundDomains —
+	     remote views stay unrestricted so SSO redirects keep working. -->
+	<key>WKAppBoundDomains</key>
+	<array>
+		<string>localhost</string>
+	</array>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

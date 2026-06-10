@@ -4,6 +4,10 @@ options:
   deploymentTarget:
     iOS: "16.4"
   createIntermediateGroups: true
+packages:
+  FlyingFox:
+    url: https://github.com/swhitty/FlyingFox
+    from: "0.20.0"
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -19,9 +23,22 @@ targets:
     sources:
       - path: CodeServerClient
         excludes:
-          - "Resources/bridge.js"
-      - path: CodeServerClient/Resources/bridge.js
+          - "Resources/**"
+      # Everything under Resources/ is bundled verbatim (bridge.js, the local
+      # workbench host page + bootstrap), never compiled.
+      - path: CodeServerClient/Resources
         buildPhase: resources
+      # Vendored serverless VS Code web bundle + ipad-files extension, served by
+      # WorkbenchServer. Folder references (copied verbatim into the bundle);
+      # populate via scripts/fetch-vscode-web.sh before generating the project.
+      - path: Vendor/vscode-web
+        type: folder
+        buildPhase: resources
+      - path: Vendor/ipad-files-web
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: FlyingFox
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: software.sister.codeserverclient
