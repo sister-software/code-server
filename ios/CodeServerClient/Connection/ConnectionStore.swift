@@ -51,11 +51,21 @@ enum ConnectionStore {
     // MARK: - SSH remote target
 
     private static let sshTargetKey = "sshTarget"
+    private static let sshNameKey = "sshName"
 
     /// "user@host[:port]" for the SSH remote, or nil if not configured.
     static var sshTarget: String? {
         get { UserDefaults.standard.string(forKey: sshTargetKey) }
         set { UserDefaults.standard.set(newValue, forKey: sshTargetKey) }
+    }
+
+    /// Friendly display name for the SSH remote (optional).
+    static var sshName: String? {
+        get { UserDefaults.standard.string(forKey: sshNameKey) }
+        set {
+            let trimmed = newValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set((trimmed?.isEmpty ?? true) ? nil : trimmed, forKey: sshNameKey)
+        }
     }
 
     /// Parses "user@host[:port]".

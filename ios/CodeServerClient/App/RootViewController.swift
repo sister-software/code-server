@@ -79,29 +79,76 @@ final class RootViewController: UIViewController {
             return
         }
 
-        var progressAlert: UIAlertController?
-        if !silent {
-            let alert = UIAlertController(title: "SSH Remote", message: "Connecting…", preferredStyle: .alert)
-            present(alert, animated: true)
-            progressAlert = alert
-        }
-
         sshReconnecting = true
         sshSession?.stop()
         let session = SSHRemoteSession()
         sshSession = session
 
+        var progressAlert: UIAlertController?
+        var cancelled = false
+        var stage = "Connecting…"
+        let startedAt = Date()
+        var timer: Timer?
+        if !silent {
+            let alert = UIAlertController(
+                title: ConnectionStore.sshName ?? "SSH Remote",
+                message: stage,
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+                cancelled = true
+                session.stop() // fails the pending NIO promises; the task unwinds
+            })
+            present(alert, animated: true)
+            progressAlert = alert
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak alert] _ in
+                alert?.message = "\(stage)\n\(Int(Date().timeIntervalSince(startedAt)))s elapsed"
+            }
+        }
+
+        // UI-level watchdog: whatever layer stalls (NIO, VPN, exec), the user
+        // gets a loud failure if no progress arrives for 60s. Progress messages
+        // (e.g. a slow first server download) keep kicking it.
+        final class ActivityBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var last = Date()
+            func kick() { lock.lock(); last = Date(); lock.unlock() }
+            var idle: TimeInterval { lock.lock(); defer { lock.unlock() }; return Date().timeIntervalSince(last) }
+        }
+        let activity = ActivityBox()
+
         Task { @MainActor in
             defer { sshReconnecting = false }
             do {
-                let ready = try await session.start(
-                    config: .init(host: parsed.host, port: parsed.port, username: parsed.user, password: password),
-                    vscodeCommit: commit,
-                    preferredLocalPort: preferredLocalPort,
-                    progress: { message in
-                        DispatchQueue.main.async { progressAlert?.message = message }
+                let ready = try await withThrowingTaskGroup(of: SSHRemoteSession.Ready.self) { group in
+                    group.addTask {
+                        try await session.start(
+                            config: .init(host: parsed.host, port: parsed.port, username: parsed.user, password: password),
+                            vscodeCommit: commit,
+                            preferredLocalPort: preferredLocalPort,
+                            progress: { message in
+                                activity.kick()
+                                DispatchQueue.main.async {
+                                    stage = message
+                                    progressAlert?.message = message
+                                }
+                            }
+                        )
                     }
-                )
+                    group.addTask {
+                        while true {
+                            try await Task.sleep(nanoseconds: 5_000_000_000)
+                            if activity.idle > 60 {
+                                throw SSHRemoteSession.SSHError.authenticationFailed(
+                                    "watchdog: no progress for 60s — the stage shown in the dialog is where it stalled"
+                                )
+                            }
+                        }
+                    }
+                    let ready = try await group.next()!
+                    group.cancelAll()
+                    return ready
+                }
                 session.onUnexpectedClose = { [weak self] in
                     DispatchQueue.main.async { self?.reconnectSSHIfNeeded() }
                 }
@@ -111,6 +158,7 @@ final class RootViewController: UIViewController {
                 )
                 sshReconnect = (target, ready.localPort)
 
+                timer?.invalidate()
                 if silent, ready.localPort == preferredLocalPort {
                     // Same authority, live tunnel: the page's own reconnect
                     // flow picks the session back up — nothing else to do.
@@ -126,11 +174,13 @@ final class RootViewController: UIViewController {
                     finish()
                 }
             } catch {
+                timer?.invalidate()
                 self.sshSession?.stop()
                 self.sshSession = nil
                 if let progressAlert {
                     progressAlert.dismiss(animated: true) { [weak self] in
-                        self?.showSSHError(String(describing: error))
+                        // User-cancelled: no error theater.
+                        if !cancelled { self?.showSSHError(String(describing: error)) }
                     }
                 }
                 // Silent reconnect failures stay quiet: the workbench shows its
@@ -161,8 +211,11 @@ final class RootViewController: UIViewController {
             self.showWeb(url: url)
         }
         vc.onConnectSSH = { [weak self] target, password in
-            self?.dismiss(animated: true)
-            self?.connectSSH(target: target, password: password)
+            // Sequence strictly: presenting the progress alert while the sheet
+            // is still dismissing makes UIKit silently drop the alert.
+            self?.dismiss(animated: true) {
+                self?.connectSSH(target: target, password: password)
+            }
         }
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .formSheet

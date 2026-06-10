@@ -102,7 +102,11 @@ final class ConnectionViewController: UITableViewController {
             cell.accessoryType = (current == WorkbenchServer.localURL) ? .checkmark : .none
             cell.selectionStyle = .default
         case .ssh:
-            cell.textLabel?.text = ConnectionStore.sshTarget ?? "Set Up SSH Remote…"
+            if let target = ConnectionStore.sshTarget {
+                cell.textLabel?.text = ConnectionStore.sshName ?? target
+            } else {
+                cell.textLabel?.text = "Set Up SSH Remote…"
+            }
             cell.selectionStyle = .default
         case .add:
             let field = makeAddField()
@@ -175,6 +179,10 @@ final class ConnectionViewController: UITableViewController {
             field.autocorrectionType = .no
             field.text = ConnectionStore.sshTarget
         }
+        alert.addTextField { field in
+            field.placeholder = "Display name (optional)"
+            field.text = ConnectionStore.sshName
+        }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
             guard let text = alert?.textFields?.first?.text,
@@ -182,6 +190,7 @@ final class ConnectionViewController: UITableViewController {
             // Re-saving doubles as "forget the pinned host key" (e.g. rekeyed server).
             HostKeyStore.forget(host: parsed.host, port: parsed.port)
             ConnectionStore.sshTarget = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            ConnectionStore.sshName = alert?.textFields?.dropFirst().first?.text
             self?.tableView.reloadData()
             self?.promptPassword(target: ConnectionStore.sshTarget!)
         })
@@ -190,7 +199,7 @@ final class ConnectionViewController: UITableViewController {
 
     private func promptPassword(target: String) {
         let alert = UIAlertController(
-            title: "Connect to \(target)",
+            title: "Connect to \(ConnectionStore.sshName ?? target)",
             message: "Uses this iPad's SSH key if the server knows it; otherwise enter a password. Copy Public Key → append to ~/.ssh/authorized_keys for passwordless logins.",
             preferredStyle: .alert
         )

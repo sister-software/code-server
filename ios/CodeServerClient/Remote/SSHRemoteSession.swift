@@ -114,12 +114,14 @@ final class SSHRemoteSession {
             userAuthDelegate: PasswordAuthDelegate(username: config.username, password: config.password),
             serverAuthDelegate: TrustOnFirstUseHostKeysDelegate(host: config.host, port: config.port)
         )
+        let wireTap = WireTapHandler() // first in pipeline: sees raw bytes
         return try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel in
                 channel.pipeline.addHandlers([
+                    wireTap,
                     NIOSSHHandler(role: .client(clientConfig), allocator: channel.allocator, inboundChildChannelInitializer: nil),
-                    AuthStateHandler(authPromise: authPromise),
+                    AuthStateHandler(authPromise: authPromise, wireTap: wireTap),
                 ])
             }
             .connect(host: config.host, port: config.port)
@@ -218,6 +220,35 @@ final class SSHRemoteSession {
     }
 }
 
+// MARK: - Wire diagnostics
+
+/// Sits first in the pipeline and watches raw inbound bytes. Distinguishes the
+/// failure modes of a stalled handshake: zero bytes = the server never spoke
+/// (gateway/policy black hole); a banner then silence = key-exchange packets
+/// dying (classic VPN MTU blackholing).
+private final class WireTapHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private(set) var bytesReceived = 0
+    private(set) var banner = ""
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let buffer = unwrapInboundIn(data)
+        bytesReceived += buffer.readableBytes
+        if banner.isEmpty, let head = buffer.getString(at: buffer.readerIndex, length: min(48, buffer.readableBytes)) {
+            banner = head.split(separator: "\r").first.map(String.init) ?? head
+        }
+        context.fireChannelRead(data)
+    }
+
+    var summary: String {
+        bytesReceived == 0
+            ? "no bytes received from server — connection reaches a black hole (VPN policy or routing?)"
+            : "received \(bytesReceived) bytes, server banner: \(banner.isEmpty ? "none" : banner) — handshake stalled mid-way (VPN MTU?)"
+    }
+}
+
 // MARK: - Handshake/auth observation
 
 /// The TCP connect resolving says nothing about SSH itself — the handshake and
@@ -227,15 +258,20 @@ private final class AuthStateHandler: ChannelInboundHandler {
     typealias InboundIn = Any
 
     private let authPromise: EventLoopPromise<Void>
+    private let wireTap: WireTapHandler
     private var completed = false
 
-    init(authPromise: EventLoopPromise<Void>) {
+    init(authPromise: EventLoopPromise<Void>, wireTap: WireTapHandler) {
         self.authPromise = authPromise
+        self.wireTap = wireTap
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
-        context.eventLoop.scheduleTask(in: .seconds(30)) { [weak self] in
-            self?.complete(.failure(SSHRemoteSession.SSHError.authenticationFailed("timed out during SSH handshake/auth")))
+        context.eventLoop.scheduleTask(in: .seconds(20)) { [weak self] in
+            guard let self else { return }
+            self.complete(.failure(SSHRemoteSession.SSHError.authenticationFailed(
+                "timed out during SSH handshake/auth; \(self.wireTap.summary)"
+            )))
         }
     }
 
