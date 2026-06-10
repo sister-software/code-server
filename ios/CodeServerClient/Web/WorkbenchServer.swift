@@ -24,6 +24,23 @@ final class WorkbenchServer {
     /// workers (webviews) only exist for app-bound domains in WKWebView.
     static var localURL: URL { URL(string: "http://localhost:\(port)/")! }
 
+    /// When set, the workbench boots attached to this remote (an SSH-forwarded
+    /// vscode-server on iPad loopback). Takes effect on the next page load.
+    struct RemoteConfig {
+        let authority: String
+        let connectionToken: String
+    }
+
+    var remote: RemoteConfig?
+
+    /// Commit of the vendored workbench, written by scripts/patch-vscode-web.py.
+    /// vscode-server downloads are keyed by it.
+    static var vscodeCommit: String? {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("vscode-web/ios-commit.txt"),
+              let commit = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return commit.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var servers: [HTTPServer] = []
     private var tasks: [Task<Void, Never>] = []
 
@@ -103,7 +120,7 @@ final class WorkbenchServer {
             return HTTPResponse(statusCode: .notFound)
         }
 
-        let configuration: [String: Any] = [
+        var configuration: [String: Any] = [
             "productConfiguration": [
                 "nameShort": "Code (iPad)",
                 "nameLong": "Code on iPad",
@@ -128,6 +145,10 @@ final class WorkbenchServer {
             "webviewEndpoint": "http://localhost:\(Self.port)/static/out/vs/workbench/contrib/webview/browser/pre/",
             "callbackRoute": "/callback",
         ]
+        if let remote {
+            configuration["remoteAuthority"] = remote.authority
+            configuration["connectionToken"] = remote.connectionToken
+        }
 
         let values: [String: String] = [
             "WORKBENCH_WEB_CONFIGURATION": Self.asAttributeJSON(configuration),

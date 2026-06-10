@@ -39,6 +39,10 @@
 	<array>
 		<string>localhost</string>
 	</array>
+	<!-- SSH remoting connects to LAN addresses (e.g. 192.168.x.x); iOS blocks
+	     local-network sockets without this and shows a permission prompt. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Code connects to your own development server over SSH on your local network.</string>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

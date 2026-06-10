@@ -48,6 +48,31 @@ enum ConnectionStore {
         }
     }
 
+    // MARK: - SSH remote target
+
+    private static let sshTargetKey = "sshTarget"
+
+    /// "user@host[:port]" for the SSH remote, or nil if not configured.
+    static var sshTarget: String? {
+        get { UserDefaults.standard.string(forKey: sshTargetKey) }
+        set { UserDefaults.standard.set(newValue, forKey: sshTargetKey) }
+    }
+
+    /// Parses "user@host[:port]".
+    static func parseSSHTarget(_ target: String) -> (user: String, host: String, port: Int)? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let at = trimmed.firstIndex(of: "@"), at != trimmed.startIndex else { return nil }
+        let user = String(trimmed[..<at])
+        var host = String(trimmed[trimmed.index(after: at)...])
+        var port = 22
+        if let colon = host.lastIndex(of: ":"), let parsed = Int(host[host.index(after: colon)...]) {
+            port = parsed
+            host = String(host[..<colon])
+        }
+        guard !host.isEmpty else { return nil }
+        return (user, host, port)
+    }
+
     /// Normalize user input: accept bare hosts by defaulting to https.
     static func normalize(_ input: String) -> URL? {
         var string = input.trimmingCharacters(in: .whitespacesAndNewlines)

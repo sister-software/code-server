@@ -30,8 +30,20 @@ BYPASS = """
 ANCHOR = "\t\t\t\tconst hostname = location.hostname;\n"
 
 
+def write_commit_file(root: Path) -> None:
+    """Extracts the compiled-in commit hash; SSH remoting downloads the official
+    vscode-server keyed by it (the remote protocol requires matching commits)."""
+    main_js = (root / "out/vs/workbench/workbench.web.main.internal.js").read_text(encoding="utf-8")
+    match = re.search(r'commit:"([0-9a-f]{40})"', main_js)
+    if not match:
+        sys.exit("could not find commit hash in workbench.web.main.internal.js")
+    (root / "ios-commit.txt").write_text(match.group(1), encoding="utf-8")
+    print(f"commit {match.group(1)} -> ios-commit.txt")
+
+
 def main() -> None:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "Vendor/vscode-web"
+    write_commit_file(root)
     page = root / "out/vs/workbench/contrib/webview/browser/pre/index.html"
     html = page.read_text(encoding="utf-8")
 

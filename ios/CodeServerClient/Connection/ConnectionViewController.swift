@@ -4,9 +4,12 @@ import UIKit
 /// the user add a new one.
 final class ConnectionViewController: UITableViewController {
     var onConnect: ((URL) -> Void)?
+    /// (target "user@host[:port]", password) — the shell does the Remote-SSH dance.
+    var onConnectSSH: ((String, String) -> Void)?
 
     private enum Section: Int, CaseIterable {
         case local
+        case ssh
         case add
         case servers
     }
@@ -63,6 +66,7 @@ final class ConnectionViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
         case .local: return "This iPad"
+        case .ssh: return "SSH Remote"
         case .add: return "Add a server"
         case .servers: return servers.isEmpty ? nil : "Saved"
         }
@@ -71,6 +75,7 @@ final class ConnectionViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch Section(rawValue: section)! {
         case .local: return "VS Code running entirely on this iPad — works offline, edits local folders."
+        case .ssh: return "Local workbench attached to your server over SSH: terminals, server-side extensions, the works. Long-press to reconfigure."
         case .add: return "Reach your home lab over Tailscale. http and self-signed certificates are accepted."
         case .servers: return nil
         }
@@ -79,6 +84,7 @@ final class ConnectionViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch Section(rawValue: section)! {
         case .local: return 1
+        case .ssh: return 1
         case .add: return 1
         case .servers: return servers.count
         }
@@ -94,6 +100,9 @@ final class ConnectionViewController: UITableViewController {
         case .local:
             cell.textLabel?.text = "Local Workbench"
             cell.accessoryType = (current == WorkbenchServer.localURL) ? .checkmark : .none
+            cell.selectionStyle = .default
+        case .ssh:
+            cell.textLabel?.text = ConnectionStore.sshTarget ?? "Set Up SSH Remote…"
             cell.selectionStyle = .default
         case .add:
             let field = makeAddField()
@@ -139,11 +148,59 @@ final class ConnectionViewController: UITableViewController {
         switch Section(rawValue: indexPath.section)! {
         case .local:
             onConnect?(WorkbenchServer.localURL)
+        case .ssh:
+            if let target = ConnectionStore.sshTarget {
+                promptPassword(target: target)
+            } else {
+                promptSSHTarget()
+            }
         case .servers:
             onConnect?(servers[indexPath.row])
         case .add:
             break
         }
+    }
+
+    // MARK: - SSH prompts
+
+    private func promptSSHTarget() {
+        let alert = UIAlertController(
+            title: "SSH Remote",
+            message: "Address of your server, e.g. teffen@lab.your-tailnet.ts.net",
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.placeholder = "user@host[:port]"
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+            field.text = ConnectionStore.sshTarget
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+            guard let text = alert?.textFields?.first?.text,
+                  ConnectionStore.parseSSHTarget(text) != nil else { return }
+            ConnectionStore.sshTarget = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            self?.tableView.reloadData()
+            self?.promptPassword(target: ConnectionStore.sshTarget!)
+        })
+        present(alert, animated: true)
+    }
+
+    private func promptPassword(target: String) {
+        let alert = UIAlertController(title: "Connect to \(target)", message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "Password"
+            field.isSecureTextEntry = true
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Change Address…", style: .default) { [weak self] _ in
+            self?.promptSSHTarget()
+        })
+        alert.addAction(UIAlertAction(title: "Connect", style: .default) { [weak self, weak alert] _ in
+            let password = alert?.textFields?.first?.text ?? ""
+            self?.onConnectSSH?(target, password)
+        })
+        present(alert, animated: true)
     }
 
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {

@@ -8,6 +8,12 @@ packages:
   FlyingFox:
     url: https://github.com/swhitty/FlyingFox
     from: "0.20.0"
+  SwiftNIO:
+    url: https://github.com/apple/swift-nio
+    from: "2.60.0"
+  SwiftNIOSSH:
+    url: https://github.com/apple/swift-nio-ssh
+    from: "0.9.0"
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -39,6 +45,12 @@ targets:
         buildPhase: resources
     dependencies:
       - package: FlyingFox
+      - package: SwiftNIO
+        product: NIOCore
+      - package: SwiftNIO
+        product: NIOPosix
+      - package: SwiftNIOSSH
+        product: NIOSSH
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: software.sister.codeserverclient
