@@ -1,6 +1,7 @@
 import * as vscode from "vscode"
 import { bridge, bridgeLog } from "./bridge"
 import { IpadFileSystemProvider } from "./fileSystemProvider"
+import { IpadPty } from "./terminal"
 
 const SCHEME = "ipadfs"
 
@@ -13,6 +14,20 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.registerFileSystemProvider(SCHEME, provider, { isCaseSensitive: true }),
   )
   bridgeLog(`registered FileSystemProvider for ${SCHEME}`)
+
+  // Offline terminal: a Pseudoterminal bridged to the native ios_system engine.
+  // Available from the terminal-profile dropdown and a command.
+  context.subscriptions.push(
+    vscode.window.registerTerminalProfileProvider("ipadFiles.terminal", {
+      provideTerminalProfile: () =>
+        new vscode.TerminalProfile({ name: "iPad", pty: new IpadPty() }),
+    }),
+  )
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ipadFiles.newTerminal", () => {
+      vscode.window.createTerminal({ name: "iPad", pty: new IpadPty() }).show()
+    }),
+  )
 
   // WebKit doesn't fire a `copy`/`cut` DOM event when there's no selection, so
   // VS Code's built-in empty-selection line copy/cut silently does nothing on

@@ -312,3 +312,51 @@
       )
   }
 })()
+
+// --- Local terminal bridge relay --------------------------------------------
+//
+// The ipad-files Pseudoterminal (web worker) talks over a same-origin
+// BroadcastChannel("ipad-terminal"); this relay forwards control messages to
+// the native `terminal` reply handler and exposes __ipadTerminalPush so native
+// can stream output/ready/exit back onto the channel. Top frame only.
+;(function () {
+  "use strict"
+
+  if (window.top !== window) return
+  if (typeof BroadcastChannel === "undefined") return
+
+  var terminal =
+    window.webkit &&
+    window.webkit.messageHandlers &&
+    window.webkit.messageHandlers.terminal
+  if (!terminal) return
+
+  var channel = new BroadcastChannel("ipad-terminal")
+  channel.onmessage = function (event) {
+    var msg = event.data
+    if (!msg || msg.dir !== "toNative" || !msg.op) return
+    terminal
+      .postMessage({ op: msg.op, id: msg.id, cols: msg.cols, rows: msg.rows, data: msg.data })
+      .then(
+        function (result) {
+          if (typeof msg.reqId === "number") {
+            channel.postMessage({ dir: "fromNative", reqId: msg.reqId, result: result })
+          }
+        },
+        function (error) {
+          if (typeof msg.reqId === "number") {
+            channel.postMessage({
+              dir: "fromNative",
+              reqId: msg.reqId,
+              result: { ok: false, error: String(error) },
+            })
+          }
+        },
+      )
+  }
+
+  // Native → extension push (output, ready, exit). base64 payload.
+  window.__ipadTerminalPush = function (id, kind, base64) {
+    channel.postMessage({ dir: "fromNative", event: kind, id: id, data: base64 })
+  }
+})()

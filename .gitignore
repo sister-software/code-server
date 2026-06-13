@@ -24,3 +24,4 @@ test/test-results
 /patches/*.diff~
 ios/Vendor/
 ios/_wip-terminal/
+lib/vscode-web/

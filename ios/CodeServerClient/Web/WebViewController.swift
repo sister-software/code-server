@@ -18,6 +18,7 @@ final class WebViewController: UIViewController {
     private let errorOverlay = ErrorOverlayView()
     private let fileBridge = FileBridgeSchemeHandler()
     private let fileBridgeMessages = FileBridgeMessageHandler()
+    private let terminalBridge = TerminalBridgeHandler()
     /// Retains the in-flight OAuth session (real Safari, for autofill/Face ID).
     private var authSession: ASWebAuthenticationSession?
 
@@ -86,6 +87,9 @@ final class WebViewController: UIViewController {
         // native URL-callback provider.
         content.add(self, name: "authSession")
         content.add(self, name: "openExternal")
+        // Offline terminal: ipad-files Pseudoterminal ↔ BroadcastChannel ↔
+        // bridge.js ↔ this handler ↔ ios_system.
+        content.addScriptMessageHandler(terminalBridge, contentWorld: .page, name: TerminalBridgeHandler.name)
         config.userContentController = content
 
         // Fallback transport (unused while BroadcastChannel works): fetch() to
@@ -113,6 +117,7 @@ final class WebViewController: UIViewController {
         }
         container.addSubview(webView)
         self.webView = webView
+        terminalBridge.webView = webView // push terminal output back to the page
 
         // Pin below the top safe area so VS Code's title bar doesn't render under
         // the status bar clock; full-bleed on the other edges.

@@ -10,6 +10,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         WKWebView.disableInputAccessoryViewGlobally()
         WKWebView.disableInputAssistantGlobally()
         WorkbenchServer.shared.startIfNeeded()
+        sideLoading = true       // load the full command set (extraCommandsDictionary)
+        initializeEnvironment()  // ios_system env (commandDictionary.plist is in app resources)
         return true
     }
 

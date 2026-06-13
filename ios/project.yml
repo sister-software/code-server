@@ -14,6 +14,8 @@ packages:
   SwiftNIOSSH:
     url: https://github.com/apple/swift-nio-ssh
     from: "0.9.0"
+  ios_system:
+    path: Vendor/ios_system
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -51,6 +53,8 @@ targets:
         product: NIOPosix
       - package: SwiftNIOSSH
         product: NIOSSH
+      - package: ios_system
+        product: ios_system
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: software.sister.codeserverclient
@@ -58,3 +62,5 @@ targets:
         INFOPLIST_FILE: CodeServerClient/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+        SWIFT_OBJC_BRIDGING_HEADER: CodeServerClient/ios_system-Bridging-Header.h
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
