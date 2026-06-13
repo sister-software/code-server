@@ -23,3 +23,4 @@ test/test-results
 /.pc
 /patches/*.diff~
 ios/Vendor/
+ios/_wip-terminal/

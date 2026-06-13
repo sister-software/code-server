@@ -27,6 +27,9 @@ final class WebViewController: UIViewController {
     private let maxRetryDelay: TimeInterval = 30
 
     var onRequestSettings: (() -> Void)?
+    /// Reports the live page URL after each committed navigation, so the owner
+    /// can persist the open folder (the workbench encodes it as `?folder=`).
+    var onNavigated: ((URL) -> Void)?
 
     init(url: URL) {
         self.url = url
@@ -89,6 +92,7 @@ final class WebViewController: UIViewController {
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.delegate = self // pin the viewport; see UIScrollViewDelegate below
+        webView.suppressesNativeInputBars = true // kill the iPad floating pill (workbench only)
         if #available(iOS 16.4, *) {
             webView.isInspectable = true // debug the live page via Safari Web Inspector
         }
@@ -161,9 +165,14 @@ final class WebViewController: UIViewController {
         webView.reload()
     }
 
-    /// Full reload from the origin URL (bypasses cache; also used for recovery).
+    /// Reload the LIVE URL (incl. the workbench's `?folder=…` etc.), falling
+    /// back to the origin. Used for jetsam recovery and retries — reloading the
+    /// bare origin instead would drop the open folder/session after iOS kills
+    /// the backgrounded web content process.
     func hardReload() {
-        load()
+        var request = URLRequest(url: webView.url ?? url)
+        request.attribution = .user
+        webView.load(request)
     }
 
     // MARK: - Resilient loading (inline error + backoff)
@@ -343,6 +352,7 @@ extension WebViewController: WKNavigationDelegate {
         loadSucceeded()
         restoreStateIfNeeded()
         webView.clearInputAssistant()
+        if let live = webView.url { onNavigated?(live) }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -379,7 +389,7 @@ extension WebViewController: WKNavigationDelegate {
     }
 }
 
-// MARK: - Popups (e.g. Cloudflare Access / SSO login windows)
+// MARK: - Popups (OAuth: GitHub sign-in, Settings Sync, Cloudflare Access)
 
 extension WebViewController: WKUIDelegate {
     func webView(
@@ -388,12 +398,36 @@ extension WebViewController: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        // WKWebView drops target=_blank / window.open by default. Load such
-        // requests in the main web view so auth popups don't silently vanish.
-        if navigationAction.targetFrame == nil {
-            webView.load(navigationAction.request)
+        // Present window.open / target=_blank in a modal popup so the main
+        // workbench is never navigated away (that produced a white screen).
+        // Returning a web view built from `configuration` lets WebKit drive the
+        // popup; it shares cookies + localStorage with the opener.
+        //
+        // Crucially, opt the POPUP out of app-bound mode: the main view stays
+        // app-bound (for service workers), but OAuth/IdP flows redirect across
+        // arbitrary domains (GitHub → your SSO provider → …) which app-bound
+        // navigation blocks. The popup still shares the opener's data store, so
+        // the final localhost /callback → localStorage handoff completes login.
+        configuration.limitsNavigationsToAppBoundDomains = false
+        let popup = PopupWebViewController(configuration: configuration) { [weak self] in
+            self?.dismiss(animated: true)
         }
-        return nil
+        // WebKit does not reliably auto-load the triggering request into the
+        // returned web view, so load it ourselves when it carries a URL. (A
+        // pure window.open('') then JS-set location still works via the
+        // returned view, so only load when there's a real request.)
+        if navigationAction.request.url != nil {
+            popup.webView.load(navigationAction.request)
+        }
+        let nav = UINavigationController(rootViewController: popup)
+        nav.modalPresentationStyle = .pageSheet
+        // If something is already presented (e.g. the action menu), dismiss it first.
+        if let presented = presentedViewController {
+            presented.dismiss(animated: false) { [weak self] in self?.present(nav, animated: true) }
+        } else {
+            present(nav, animated: true)
+        }
+        return popup.webView
     }
 }
 

@@ -35,9 +35,18 @@
 	     workbench needs one for VS Code webviews (markdown preview etc.). Only
 	     the local web view opts in via limitsNavigationsToAppBoundDomains —
 	     remote views stay unrestricted so SSO redirects keep working. -->
+	<!-- App-bound mode (per-web-view, local workbench only) unlocks service
+	     workers but restricts navigation to these domains. localhost is the
+	     workbench origin; the rest are OAuth providers that open in a popup
+	     (GitHub sign-in, Settings Sync). Max 10 entries. -->
 	<key>WKAppBoundDomains</key>
 	<array>
 		<string>localhost</string>
+		<string>github.com</string>
+		<string>vscode.dev</string>
+		<string>login.microsoftonline.com</string>
+		<string>login.live.com</string>
+		<string>microsoft.com</string>
 	</array>
 	<!-- SSH remoting connects to LAN addresses (e.g. 192.168.x.x); iOS blocks
 	     local-network sockets without this and shows a permission prompt. -->

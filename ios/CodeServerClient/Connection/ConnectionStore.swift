@@ -48,6 +48,25 @@ enum ConnectionStore {
         }
     }
 
+    // MARK: - Last open folder (per connection)
+
+    private static let lastFolderPrefix = "lastFolder:"
+
+    /// The `?folder=` URI the workbench last had open for a given connection key
+    /// ("local", "ssh:<target>", or a remote URL). Restored on next connect.
+    static func lastFolder(_ connectionKey: String) -> String? {
+        UserDefaults.standard.string(forKey: lastFolderPrefix + connectionKey)
+    }
+
+    static func setLastFolder(_ value: String?, _ connectionKey: String) {
+        let key = lastFolderPrefix + connectionKey
+        if let value, !value.isEmpty {
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
     // MARK: - SSH remote target
 
     private static let sshTargetKey = "sshTarget"

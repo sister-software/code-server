@@ -3,6 +3,26 @@ import WebKit
 import ObjectiveC
 
 extension WKWebView {
+    private static var suppressBarsKey: UInt8 = 0
+
+    /// Opt-in flag: only web views with this set get the iPad input-assistant
+    /// bar suppressed. The workbench sets it (kills the floating pill); the
+    /// OAuth popup leaves it false so password AutoFill still appears.
+    var suppressesNativeInputBars: Bool {
+        get { (objc_getAssociatedObject(self, &Self.suppressBarsKey) as? Bool) ?? false }
+        set { objc_setAssociatedObject(self, &Self.suppressBarsKey, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    /// Walks up from a WKContentView to its owning WKWebView.
+    fileprivate static func owningWebView(of view: AnyObject) -> WKWebView? {
+        var current = view as? UIView
+        while let v = current {
+            if let webView = v as? WKWebView { return webView }
+            current = v.superview
+        }
+        return nil
+    }
+
     /// Removes the floating input accessory / assistant bar (the prev-next arrows
     /// + dictation pill) from every WKWebView by overriding `inputAccessoryView`
     /// on the private `WKContentView` class to return nil.
@@ -50,8 +70,12 @@ extension WKWebView {
         let original = unsafeBitCast(method_getImplementation(template), to: Getter.self)
         let block: @convention(block) (AnyObject) -> UITextInputAssistantItem = { receiver in
             let item = original(receiver, selector)
-            item.leadingBarButtonGroups = []
-            item.trailingBarButtonGroups = []
+            // Only suppress for opted-in web views (the workbench). The OAuth
+            // popup keeps its assistant bar so password AutoFill is offered.
+            if WKWebView.owningWebView(of: receiver)?.suppressesNativeInputBars == true {
+                item.leadingBarButtonGroups = []
+                item.trailingBarButtonGroups = []
+            }
             return item
         }
         let implementation = imp_implementationWithBlock(block)

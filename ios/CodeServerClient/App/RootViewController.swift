@@ -11,11 +11,16 @@ final class RootViewController: UIViewController {
     private var sshReconnect: (target: String, localPort: Int)?
     private var sshReconnecting = false
 
+    /// Identity of the active connection ("local", "ssh:<target>", or a remote
+    /// URL) and its remote authority, so we can persist/restore the open folder.
+    private var connectionKey = "local"
+    private var remoteAuthority: String?
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         if let url = ConnectionStore.serverURL {
-            showWeb(url: url)
+            showWeb(base: url, connectionKey: Self.key(for: url))
         }
         // iOS suspension kills the SSH tunnel; try a silent key-based
         // reconnect when the app returns, so the workbench's own reconnect
@@ -46,7 +51,15 @@ final class RootViewController: UIViewController {
         webVC?.snapshotState()
     }
 
-    private func showWeb(url: URL) {
+    /// Connection identity used to key the persisted open folder.
+    private static func key(for url: URL) -> String {
+        url == WorkbenchServer.localURL ? "local" : url.absoluteString
+    }
+
+    private func showWeb(base: URL, connectionKey: String, remoteAuthority: String? = nil) {
+        self.connectionKey = connectionKey
+        self.remoteAuthority = remoteAuthority
+
         if let existing = webVC {
             existing.willMove(toParent: nil)
             existing.view.removeFromSuperview()
@@ -54,8 +67,9 @@ final class RootViewController: UIViewController {
             webVC = nil
         }
 
-        let vc = WebViewController(url: url)
+        let vc = WebViewController(url: urlWithSavedFolder(base: base, connectionKey: connectionKey))
         vc.onRequestSettings = { [weak self] in self?.presentConnection(animated: true) }
+        vc.onNavigated = { [weak self] live in self?.persistFolder(from: live) }
 
         addChild(vc)
         vc.view.frame = view.bounds
@@ -63,6 +77,37 @@ final class RootViewController: UIViewController {
         view.addSubview(vc.view)
         vc.didMove(toParent: self)
         webVC = vc
+    }
+
+    // MARK: - Open-folder persistence
+
+    /// Appends the saved `?folder=` for this connection, rewriting a remote
+    /// authority to the current tunnel's (the forward port changes per connect).
+    private func urlWithSavedFolder(base: URL, connectionKey: String) -> URL {
+        guard let saved = ConnectionStore.lastFolder(connectionKey) else { return base }
+        let folder = rewriteRemoteAuthority(saved)
+        guard var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
+        comps.queryItems = [URLQueryItem(name: "folder", value: folder)]
+        return comps.url ?? base
+    }
+
+    private func persistFolder(from live: URL) {
+        let folder = URLComponents(url: live, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "folder" })?.value
+        ConnectionStore.setLastFolder(folder, connectionKey)
+    }
+
+    /// `vscode-remote://<old authority>/path` → `vscode-remote://<current>/path`.
+    /// Remote folder URIs embed the loopback forward port, which differs each
+    /// connection; the path is the stable part.
+    private func rewriteRemoteAuthority(_ folder: String) -> String {
+        let scheme = "vscode-remote://"
+        guard folder.hasPrefix(scheme), let authority = remoteAuthority else { return folder }
+        let rest = folder.dropFirst(scheme.count)
+        if let slash = rest.firstIndex(of: "/") {
+            return scheme + authority + String(rest[slash...])
+        }
+        return scheme + authority
     }
 
     /// The Remote-SSH dance, natively: SSH in, bootstrap the official
@@ -166,7 +211,11 @@ final class RootViewController: UIViewController {
                 }
                 let finish = { [weak self] in
                     ConnectionStore.use(WorkbenchServer.localURL)
-                    self?.showWeb(url: WorkbenchServer.localURL)
+                    self?.showWeb(
+                        base: WorkbenchServer.localURL,
+                        connectionKey: "ssh:\(target)",
+                        remoteAuthority: "localhost:\(ready.localPort)"
+                    )
                 }
                 if let progressAlert {
                     progressAlert.dismiss(animated: true, completion: finish)
@@ -208,7 +257,7 @@ final class RootViewController: UIViewController {
             WorkbenchServer.shared.remote = nil
             ConnectionStore.use(url)
             self.dismiss(animated: true)
-            self.showWeb(url: url)
+            self.showWeb(base: url, connectionKey: Self.key(for: url))
         }
         vc.onConnectSSH = { [weak self] target, password in
             // Sequence strictly: presenting the progress alert while the sheet
