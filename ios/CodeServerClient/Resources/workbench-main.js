@@ -192,6 +192,51 @@ class LocalStorageURLCallbackProvider {
         this._onCallback.dispose();
     }
 }
+// URL-callback provider that routes OAuth through the native layer's
+// ASWebAuthenticationSession (real Safari → password AutoFill + Face ID),
+// instead of a WKWebView popup. create() points the redirect at the server's
+// /auth-bridge route, which 302s to a custom scheme the auth session catches;
+// native then calls window.__nativeAuthDeliver with the final query string.
+// The reconstruction below mirrors the bundle's callback.html exactly.
+class NativeURLCallbackProvider {
+    constructor() {
+        this._emitter = new Emitter();
+        this.onCallback = this._emitter.event;
+        this._reqId = 0;
+        window.__nativeAuthDeliver = (rawQuery) => this._deliver(rawQuery);
+    }
+    create(options = {}) {
+        // Mark that an OAuth flow is starting; bridge.js routes the imminent
+        // window.open to the native auth session (vs the system browser).
+        window.__codeAuthExpected = Date.now();
+        const id = ++this._reqId;
+        const q = [`vscode-reqid=${id}`];
+        for (const key of ['scheme', 'authority', 'path', 'query', 'fragment']) {
+            if (options[key]) q.push(`vscode-${key}=${encodeURIComponent(options[key])}`);
+        }
+        return URI.parse(window.location.href).with({ path: '/auth-bridge', query: q.join('&') });
+    }
+    _deliver(rawQuery) {
+        const params = new URLSearchParams(rawQuery);
+        const scheme = params.get('vscode-scheme');
+        const authority = params.get('vscode-authority');
+        if (!scheme || !authority) return;
+        const path = params.get('vscode-path');
+        const query = params.get('vscode-query');
+        const fragment = params.get('vscode-fragment');
+        for (const k of ['vscode-reqid', 'vscode-scheme', 'vscode-authority', 'vscode-path', 'vscode-query', 'vscode-fragment']) {
+            params.delete(k);
+        }
+        const uri = { scheme, authority };
+        if (path) uri.path = path;
+        if (query) { new URLSearchParams(query).forEach((v, k) => params.set(k, v)); }
+        const rq = params.toString();
+        if (rq) uri.query = rq;
+        if (fragment) uri.fragment = fragment;
+        this._emitter.fire(URI.from(uri));
+    }
+}
+
 (function () {
     const configElement = window.document.getElementById('vscode-workbench-web-configuration');
     const configElementAttribute = configElement ? configElement.getAttribute('data-settings') : undefined;
@@ -199,9 +244,14 @@ class LocalStorageURLCallbackProvider {
         throw new Error('Missing web configuration element');
     }
     const config = JSON.parse(configElementAttribute);
+    // Use the native auth-session provider when running inside the wrapper;
+    // fall back to the localStorage provider otherwise (e.g. plain browser).
+    const nativeAuth = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.authSession);
     create(window.document.body, {
         ...config,
         workspaceProvider: WorkspaceProvider.create(config),
-        urlCallbackProvider: new LocalStorageURLCallbackProvider(config.callbackRoute)
+        urlCallbackProvider: nativeAuth
+            ? new NativeURLCallbackProvider()
+            : new LocalStorageURLCallbackProvider(config.callbackRoute)
     });
 })();

@@ -1,3 +1,4 @@
+import AuthenticationServices
 import UIKit
 import WebKit
 
@@ -17,6 +18,8 @@ final class WebViewController: UIViewController {
     private let errorOverlay = ErrorOverlayView()
     private let fileBridge = FileBridgeSchemeHandler()
     private let fileBridgeMessages = FileBridgeMessageHandler()
+    /// Retains the in-flight OAuth session (real Safari, for autofill/Face ID).
+    private var authSession: ASWebAuthenticationSession?
 
     /// Latest editor state captured before a likely jetsam, replayed after reload.
     private var pendingState: String?
@@ -77,6 +80,12 @@ final class WebViewController: UIViewController {
         // BroadcastChannel relayed by bridge.js to this reply handler. Not CSP-
         // governed, so it needs no connect-src allowance.
         content.addScriptMessageHandler(fileBridgeMessages, contentWorld: .page, name: FileBridgeMessageHandler.name)
+        // bridge.js routes window.open here: "authSession" for OAuth (Safari
+        // autofill), "openExternal" for plain links (system browser). The
+        // presence of "authSession" also tells workbench-main.js to use the
+        // native URL-callback provider.
+        content.add(self, name: "authSession")
+        content.add(self, name: "openExternal")
         config.userContentController = content
 
         // Fallback transport (unused while BroadcastChannel works): fetch() to
@@ -93,6 +102,12 @@ final class WebViewController: UIViewController {
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.delegate = self // pin the viewport; see UIScrollViewDelegate below
         webView.suppressesNativeInputBars = true // kill the iPad floating pill (workbench only)
+        // The strip exposed when the keyboard resizes the viewport is painted
+        // with underPageBackgroundColor (a system gray by default). Match the
+        // app background so it blends instead of flashing gray.
+        webView.underPageBackgroundColor = .systemBackground
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
         if #available(iOS 16.4, *) {
             webView.isInspectable = true // debug the live page via Safari Web Inspector
         }
@@ -398,36 +413,55 @@ extension WebViewController: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        // Present window.open / target=_blank in a modal popup so the main
-        // workbench is never navigated away (that produced a white screen).
-        // Returning a web view built from `configuration` lets WebKit drive the
-        // popup; it shares cookies + localStorage with the opener.
-        //
-        // Crucially, opt the POPUP out of app-bound mode: the main view stays
-        // app-bound (for service workers), but OAuth/IdP flows redirect across
-        // arbitrary domains (GitHub → your SSO provider → …) which app-bound
-        // navigation blocks. The popup still shares the opener's data store, so
-        // the final localhost /callback → localStorage handoff completes login.
-        configuration.limitsNavigationsToAppBoundDomains = false
-        let popup = PopupWebViewController(configuration: configuration) { [weak self] in
-            self?.dismiss(animated: true)
+        // window.open is intercepted in bridge.js and routed via message
+        // handlers, so this fires only for popups that bypass it (e.g.
+        // <a target="_blank"> / form targets). Treat those as external links.
+        if let target = navigationAction.request.url {
+            UIApplication.shared.open(target)
         }
-        // WebKit does not reliably auto-load the triggering request into the
-        // returned web view, so load it ourselves when it carries a URL. (A
-        // pure window.open('') then JS-set location still works via the
-        // returned view, so only load when there's a real request.)
-        if navigationAction.request.url != nil {
-            popup.webView.load(navigationAction.request)
+        return nil
+    }
+
+    private func startAuthSession(url: URL) {
+        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "codeipad") { [weak self] callbackURL, _ in
+            self?.authSession = nil
+            guard let self,
+                  let callbackURL,
+                  let query = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.percentEncodedQuery
+            else { return }
+            // Deliver the (already percent-encoded) query to the workbench's
+            // native URL-callback provider, which reconstructs the vscode: URI.
+            let literal = Self.jsStringLiteral(query)
+            self.webView.evaluateJavaScript(
+                "window.__nativeAuthDeliver && window.__nativeAuthDeliver(\(literal));"
+            )
         }
-        let nav = UINavigationController(rootViewController: popup)
-        nav.modalPresentationStyle = .pageSheet
-        // If something is already presented (e.g. the action menu), dismiss it first.
-        if let presented = presentedViewController {
-            presented.dismiss(animated: false) { [weak self] in self?.present(nav, animated: true) }
-        } else {
-            present(nav, animated: true)
+        session.presentationContextProvider = self
+        // Share Safari's cookies + saved credentials (the whole point: autofill).
+        session.prefersEphemeralWebBrowserSession = false
+        authSession = session
+        session.start()
+    }
+}
+
+extension WebViewController: ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        view.window ?? ASPresentationAnchor()
+    }
+}
+
+// MARK: - window.open routing (auth session vs system browser)
+
+extension WebViewController: WKScriptMessageHandler {
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let urlString = body["url"] as? String,
+              let url = URL(string: urlString) else { return }
+        switch message.name {
+        case "authSession": startAuthSession(url: url)
+        case "openExternal": UIApplication.shared.open(url)
+        default: break
         }
-        return popup.webView
     }
 }
 

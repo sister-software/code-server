@@ -122,6 +122,45 @@
     }
   }
 
+  // --- window.open routing ----------------------------------------------------
+  //
+  // OAuth (a urlCallbackProvider.create() ran in the last few seconds) goes to
+  // the native ASWebAuthenticationSession — real Safari, with password AutoFill
+  // and Face ID. Everything else (plain external links) opens in the system
+  // browser, so ordinary links aren't trapped in a sign-in sheet.
+  var authHandler = window.webkit.messageHandlers.authSession
+  var externalHandler = window.webkit.messageHandlers.openExternal
+  if (authHandler || externalHandler) {
+    var realOpen = window.open ? window.open.bind(window) : null
+    window.open = function (url, target, features) {
+      try {
+        var href = url == null ? "" : String(url)
+        if (/^https?:/i.test(href)) {
+          var expectingAuth =
+            window.__codeAuthExpected && Date.now() - window.__codeAuthExpected < 3000
+          if (expectingAuth && authHandler) {
+            window.__codeAuthExpected = 0
+            authHandler.postMessage({ url: href })
+          } else if (externalHandler) {
+            externalHandler.postMessage({ url: href })
+          }
+          // A non-null stand-in so callers don't treat this as a blocked popup.
+          return {
+            closed: false,
+            close: function () {},
+            focus: function () {},
+            blur: function () {},
+            postMessage: function () {},
+            location: { href: href },
+          }
+        }
+      } catch (e) {
+        /* fall through to native open */
+      }
+      return realOpen ? realOpen(url, target, features) : null
+    }
+  }
+
   // --- Jetsam recovery hooks (native <-> page) --------------------------------
   //
   // The native shell calls saveState() before iOS is likely to kill the web

@@ -97,6 +97,17 @@ final class WorkbenchServer {
         await server.appendRoute("GET /callback") { _ in
             Self.fileResponse(webRoot.appendingPathComponent("out/vs/code/browser/workbench/callback.html"))
         }
+        // OAuth bridge: the native ASWebAuthenticationSession runs the login in
+        // real Safari (autofill/Face ID); the relay redirects here, and we 302
+        // to a custom scheme the auth session can catch and hand back to native.
+        await server.appendRoute("GET /auth-bridge") { request in
+            let query = request.query.map { item in
+                "\(Self.encodeQueryComponent(item.name))=\(Self.encodeQueryComponent(item.value))"
+            }.joined(separator: "&")
+            var response = HTTPResponse(statusCode: .found)
+            response.headers[HTTPHeader("Location")] = "codeipad://auth-callback?\(query)"
+            return response
+        }
         await server.appendRoute("GET /static/*") { request in
             // `code serve-web` exposes a few bundle-root files under
             // /static/resources/server/ (icons, manifest).
@@ -193,6 +204,18 @@ final class WorkbenchServer {
         // keep cross-origin fetches (e.g. the builtin extension) working.
         response.headers[HTTPHeader("Access-Control-Allow-Origin")] = "*"
         return response
+    }
+
+    /// Percent-encodes a query name/value (escapes `=` `&` etc.) so a value that
+    /// itself contains a query string round-trips as a single component.
+    private static let queryComponentAllowed: CharacterSet = {
+        var set = CharacterSet.alphanumerics
+        set.insert(charactersIn: "-._~")
+        return set
+    }()
+
+    private static func encodeQueryComponent(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: queryComponentAllowed) ?? s
     }
 
     private static func mimeType(for ext: String) -> String {
