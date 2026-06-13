@@ -1,11 +1,12 @@
 import Foundation
 
-/// Pseudo-terminal backed by `ios_system`: a pthread that runs a readline
-/// loop dispatching each line to `ios_system()`. Pipes bridge keyboard input
-/// (from VS Code via WKWebView) and terminal output (back to VS Code).
+/// Pseudo-terminal backed by `ios_system` (a-Shell's engine).
 ///
-/// ios_system uses per-thread `thread_stdin` / `thread_stdout` / `thread_stderr`
-/// FILE* globals — we redirect those to our pipes before entering the loop.
+/// A dedicated pthread owns the session. Command lines are delivered out-of-band
+/// (the front-end does prompt editing and ships a whole line via `runCommand`);
+/// the stdin PIPE is reserved for the *running* command's raw input, so
+/// interactive programs (REPLs, editors) get character-at-a-time keystrokes and
+/// a tty (`ios_settty`). Output streams back over the stdout pipe.
 final class TerminalSession {
 
     let id: Int
@@ -17,25 +18,25 @@ final class TerminalSession {
     private let sidString: UnsafeMutablePointer<CChar>
     private var sessionId: UnsafeRawPointer { UnsafeRawPointer(sidString) }
 
-    /// Called with stdout + stderr output (UTF‑8 chunks).
     var onData: ((String) -> Void)?
-
-    /// Called when the loop exits (either "exit" command or force‑kill).
     var onExit: ((Int32) -> Void)?
-
-    /// Called when a command finishes (and once at startup) so the front-end
-    /// can print its prompt. Fires on the main queue.
+    /// Fires when a command finishes (and once at startup) so the front-end can
+    /// return to prompt mode. Main queue.
     var onReady: (() -> Void)?
 
-    // -- pipe descriptors (owned by the reading end) --
-    private var stdinPipe: [Int32] = [-1, -1]   // [0]=read(shell), [1]=write(us)
-    private var stdoutPipe: [Int32] = [-1, -1]  // [0]=read(us),    [1]=write(shell)
+    private var stdinPipe: [Int32] = [-1, -1]   // [0]=read(command), [1]=write(us)
+    private var stdoutPipe: [Int32] = [-1, -1]  // [0]=read(us),       [1]=write(command)
 
     private var thread: pthread_t?
     private var stdoutSource: DispatchSourceRead?
-    private let queue = DispatchQueue(label: "codeserver.terminal.\(UUID().uuidString.prefix(8))")
+    private let queue = DispatchQueue(label: "codeserver.terminal")
 
-    // MARK: - init / deinit
+    // Command delivery to the session thread.
+    private let commandSemaphore = DispatchSemaphore(value: 0)
+    private let commandLock = NSLock()
+    private var pendingCommands: [String] = []
+    private var closed = false
+    private var commandRunning = false
 
     init(id: Int, cols: Int, rows: Int) {
         self.id = id
@@ -44,6 +45,7 @@ final class TerminalSession {
         self.sidString = strdup("ipad-term-\(id)")
         setenv("COLUMNS", "\(cols)", 1)
         setenv("LINES", "\(rows)", 1)
+        setenv("TERM", "xterm-256color", 1)
     }
 
     deinit {
@@ -53,66 +55,73 @@ final class TerminalSession {
 
     // MARK: - start
 
-    /// Returns true if the shell thread launched successfully.
     func start() -> Bool {
         guard pipe(&stdinPipe) == 0, pipe(&stdoutPipe) == 0 else { return false }
 
         let raw = UnsafeMutablePointer<TerminalSession>.allocate(capacity: 1)
         raw.initialize(to: self)
 
-        let rc = pthread_create(&thread, nil, { ptr in
+        // ios_system commands can use deep stacks; give the thread room.
+        var attr = pthread_attr_t()
+        pthread_attr_init(&attr)
+        pthread_attr_setstacksize(&attr, 4 * 1024 * 1024)
+
+        let rc = pthread_create(&thread, &attr, { ptr in
             let session = ptr.assumingMemoryBound(to: TerminalSession.self).pointee
 
             let sid = session.sessionId
-            let inFile = fdopen(session.stdinPipe[0], "r")     // shell reads
-            let outFile = fdopen(session.stdoutPipe[1], "w")   // shell writes
-            setvbuf(outFile, nil, _IONBF, 0)                   // unbuffered → output reaches the pipe promptly
+            let inFile = fdopen(session.stdinPipe[0], "r")     // command reads
+            let outFile = fdopen(session.stdoutPipe[1], "w")   // command writes
+            setvbuf(inFile, nil, _IONBF, 0)
+            setvbuf(outFile, nil, _IONBF, 0)
 
             thread_stdin = inFile
             thread_stdout = outFile
             thread_stderr = outFile
 
-            // Register the session once so chdir/env persist across commands.
-            ios_switchSession(sid)
-            ios_setContext(sid)
-            ios_setStreams(inFile, outFile, outFile)
-            ios_setWindowSize(Int32(session.cols), Int32(session.rows), sid)
+            let configure = {
+                ios_switchSession(sid)
+                ios_setContext(sid)
+                ios_setStreams(inFile, outFile, outFile)
+                ios_settty(inFile)
+                ios_setWindowSize(Int32(session.cols), Int32(session.rows), sid)
+            }
+            configure()
 
-            // Initial prompt.
-            DispatchQueue.main.async { session.onReady?() }
+            DispatchQueue.main.async { session.onReady?() } // initial prompt
 
-            // Shell readline loop — one line → one ios_system() call.
-            var lineBuf = [CChar](repeating: 0, count: 4096)
-            while fgets(&lineBuf, Int32(lineBuf.count), inFile) != nil {
-                let line = String(cString: lineBuf).trimmingCharacters(in: .newlines)
-                if line == "exit" { break }
-                if !line.isEmpty {
-                    // Re-assert this session's streams before each command in
-                    // case another terminal switched the global ios_system state.
-                    ios_switchSession(sid)
-                    ios_setContext(sid)
-                    ios_setStreams(inFile, outFile, outFile)
-                    ios_setWindowSize(Int32(session.cols), Int32(session.rows), sid)
-                    ios_system(line)
+            while true {
+                session.commandSemaphore.wait()
+                session.commandLock.lock()
+                if session.closed { session.commandLock.unlock(); break }
+                let cmd = session.pendingCommands.isEmpty ? nil : session.pendingCommands.removeFirst()
+                if cmd != nil { session.commandRunning = true }
+                session.commandLock.unlock()
+
+                guard let command = cmd else { continue }
+                if !command.isEmpty {
+                    configure() // re-assert: another terminal may have switched global state
+                    ios_system(command)
                     fflush(outFile)
                 }
+                session.commandLock.lock()
+                session.commandRunning = false
+                session.commandLock.unlock()
                 DispatchQueue.main.async { session.onReady?() }
-                lineBuf = [CChar](repeating: 0, count: 4096)
             }
 
             ios_closeSession(sid)
             fflush(outFile)
             fclose(inFile)
             fclose(outFile)
-
             DispatchQueue.main.async { session.onExit?(0) }
             ptr.deallocate()
             return nil
         }, raw)
+        pthread_attr_destroy(&attr)
 
         if rc != 0 { raw.deallocate(); return false }
 
-        // Dispatch source for stdout reads.
         let src = DispatchSource.makeReadSource(fileDescriptor: stdoutPipe[0], queue: queue)
         src.setEventHandler { [weak self] in
             guard let self else { return }
@@ -125,23 +134,33 @@ final class TerminalSession {
                 }
             }
         }
-        src.setCancelHandler { [weak self] in
-            self?.stdoutPipe[0] = -1
-        }
+        src.setCancelHandler { [weak self] in self?.stdoutPipe[0] = -1 }
         src.resume()
         stdoutSource = src
-
         return true
     }
 
-    // MARK: - write (stdin)
+    // MARK: - input
 
+    /// Run a command line (from the front-end's prompt editor).
+    func runCommand(_ line: String) {
+        commandLock.lock()
+        pendingCommands.append(line)
+        commandLock.unlock()
+        commandSemaphore.signal()
+    }
+
+    /// Raw keystrokes for the currently running command's stdin.
     func writeInput(_ data: String) {
         guard stdinPipe[1] >= 0, let d = data.data(using: .utf8) else { return }
         d.withUnsafeBytes { _ = Darwin.write(stdinPipe[1], $0.baseAddress, d.count) }
     }
 
-    func writeln(_ line: String) { writeInput(line + "\n") }
+    /// Ctrl-C: interrupt the running command (no-op at the prompt).
+    func interrupt() {
+        commandLock.lock(); let running = commandRunning; commandLock.unlock()
+        if running { ios_kill() }
+    }
 
     // MARK: - resize
 
@@ -155,22 +174,22 @@ final class TerminalSession {
 
     // MARK: - shutdown
 
-    /// Graceful: sends "exit\n".
-    func requestExit() {
-        writeln("exit")
-        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(3)) { [weak self] in
-            self?.forceKill()
-        }
-    }
+    func requestExit() { forceKill() }
 
-    /// Immediate: cancels thread and closes pipes.
     func forceKill() {
+        commandLock.lock()
+        if closed { commandLock.unlock(); return }
+        closed = true
+        let running = commandRunning
+        commandLock.unlock()
+        commandSemaphore.signal() // unblock the wait if idle
+        if running { ios_kill() }  // unblock a running command
+
         stdoutSource?.cancel()
         stdoutSource = nil
-        if let t = thread { pthread_cancel(t); thread = nil }
-        if stdinPipe[1]  >= 0 { Darwin.close(stdinPipe[1]);  stdinPipe[1]  = -1 }
+        thread = nil
+        if stdinPipe[1] >= 0 { Darwin.close(stdinPipe[1]); stdinPipe[1] = -1 }
         if stdoutPipe[0] >= 0 { Darwin.close(stdoutPipe[0]); stdoutPipe[0] = -1 }
         if stdoutPipe[1] >= 0 { Darwin.close(stdoutPipe[1]); stdoutPipe[1] = -1 }
-        onExit?(137)
     }
 }

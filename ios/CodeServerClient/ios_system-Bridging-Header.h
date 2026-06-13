@@ -29,3 +29,5 @@ extern void ios_closeSession(const void *sessionid);
 extern void ios_setContext(const void *context);
 extern void ios_setStreams(FILE *_stdin, FILE *_stdout, FILE *_stderr);
 extern void ios_setWindowSize(int width, int height, const void *sessionId);
+extern void ios_settty(FILE *_tty);   // mark the streams as a tty (interactive programs)
+extern int ios_kill(void);            // interrupt the running command (Ctrl-C)

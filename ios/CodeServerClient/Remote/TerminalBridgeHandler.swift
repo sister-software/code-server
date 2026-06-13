@@ -36,11 +36,20 @@ final class TerminalBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
             let cols = body["cols"] as? Int ?? 80
             let rows = body["rows"] as? Int ?? 24
             open(id: id, cols: cols, rows: rows, reply: replyHandler)
-        case "input":
+        case "run":
+            if let b64 = body["data"] as? String, let data = Data(base64Encoded: b64),
+               let text = String(data: data, encoding: .utf8) {
+                session(id)?.runCommand(text)
+            }
+            replyHandler(["ok": true], nil)
+        case "stdin":
             if let b64 = body["data"] as? String, let data = Data(base64Encoded: b64),
                let text = String(data: data, encoding: .utf8) {
                 session(id)?.writeInput(text)
             }
+            replyHandler(["ok": true], nil)
+        case "interrupt":
+            session(id)?.interrupt()
             replyHandler(["ok": true], nil)
         case "resize":
             if let cols = body["cols"] as? Int, let rows = body["rows"] as? Int {

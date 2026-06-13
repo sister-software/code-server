@@ -82,6 +82,11 @@ export class IpadPty implements vscode.Pseudoterminal {
   private buffer = ""
   private cols = 80
   private rows = 24
+  // "prompt": we line-edit locally and ship a whole line via run.
+  // "running": a command owns the tty — forward every keystroke raw to stdin.
+  private mode: "prompt" | "running" = "prompt"
+  private history: string[] = []
+  private historyIndex = 0
 
   open(initialDimensions: vscode.TerminalDimensions | undefined): void {
     if (initialDimensions) {
@@ -107,27 +112,55 @@ export class IpadPty implements vscode.Pseudoterminal {
   }
 
   handleInput(data: string): void {
+    // A command owns the tty: forward keystrokes raw (the program echoes and
+    // does its own editing). Ctrl-C interrupts the command.
+    if (this.mode === "running") {
+      if (data === "\x03") {
+        void bridge.send("interrupt", this.id)
+      } else {
+        void bridge.send("stdin", this.id, { data: encode(data) })
+      }
+      return
+    }
+
+    // Prompt mode: local line editing.
     for (const ch of data) {
       if (ch === "\r") {
-        // Enter: echo newline, ship the line, reset.
         this.writeEmitter.fire("\r\n")
-        void bridge.send("input", this.id, { data: encode(this.buffer + "\n") })
+        const line = this.buffer
         this.buffer = ""
+        if (line.trim().length > 0) {
+          this.history.push(line)
+          this.historyIndex = this.history.length
+        }
+        this.mode = "running"
+        void bridge.send("run", this.id, { data: encode(line) })
       } else if (ch === "\x7f" || ch === "\b") {
-        // Backspace.
         if (this.buffer.length > 0) {
           this.buffer = this.buffer.slice(0, -1)
           this.writeEmitter.fire("\b \b")
         }
       } else if (ch === "\x03") {
-        // Ctrl-C: abandon the current line.
         this.writeEmitter.fire("^C\r\n")
         this.buffer = ""
-        void bridge.send("input", this.id, { data: encode("\n") })
+        this.writeEmitter.fire("\x1b[32m$\x1b[0m ")
+      } else if (ch === "\x1b") {
+        // Escape sequences (arrows): handle up/down for history below.
+        // Full sequences arrive in one chunk, so inspect `data` directly.
       } else if (ch >= " ") {
         this.buffer += ch
-        this.writeEmitter.fire(ch) // echo
+        this.writeEmitter.fire(ch)
       }
+    }
+
+    // Up/Down history recall (arrows come as ESC[A / ESC[B).
+    if (data === "\x1b[A" || data === "\x1b[B") {
+      if (data === "\x1b[A" && this.historyIndex > 0) this.historyIndex--
+      else if (data === "\x1b[B" && this.historyIndex < this.history.length) this.historyIndex++
+      const recalled = this.history[this.historyIndex] ?? ""
+      // Clear the current line, then write the recalled command.
+      this.writeEmitter.fire("\r\x1b[K\x1b[32m$\x1b[0m " + recalled)
+      this.buffer = recalled
     }
   }
 
@@ -138,6 +171,8 @@ export class IpadPty implements vscode.Pseudoterminal {
         this.writeEmitter.fire(decode(data).replace(/(?<!\r)\n/g, "\r\n"))
         break
       case "ready":
+        // Command finished (or initial): back to prompt mode.
+        this.mode = "prompt"
         this.writeEmitter.fire("\x1b[32m$\x1b[0m ")
         break
       case "exit":
