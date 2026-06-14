@@ -13,9 +13,6 @@ final class TerminalBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
 
     weak var webView: WKWebView?
 
-    /// The terminal id currently attached to the shared iSH console.
-    private var activeId: Int?
-
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage,
@@ -30,28 +27,28 @@ final class TerminalBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
 
         switch op {
         case "open":
-            activeId = id
-            IshTerminal.shared.onOutput = { [weak self] data in
-                self?.push(id: id, kind: "data", data: data)
-            }
-            IshTerminal.shared.ensureBooted()
-            if let cols = body["cols"] as? Int, let rows = body["rows"] as? Int {
-                IshTerminal.shared.setWinsize(cols: cols, rows: rows)
+            let cols = body["cols"] as? Int ?? 80
+            let rows = body["rows"] as? Int ?? 24
+            IshTerminal.shared.open(id: id, cols: cols, rows: rows) { [weak self] data in
+                if let data {
+                    self?.push(id: id, kind: "data", data: data)
+                } else {
+                    self?.push(id: id, kind: "exit", data: Data("0".utf8))
+                }
             }
             replyHandler(["ok": true], nil)
         case "stdin":
             if let b64 = body["data"] as? String, let data = Data(base64Encoded: b64) {
-                IshTerminal.shared.sendInput(data)
+                IshTerminal.shared.input(id: id, data)
             }
             replyHandler(["ok": true], nil)
         case "resize":
             if let cols = body["cols"] as? Int, let rows = body["rows"] as? Int {
-                IshTerminal.shared.setWinsize(cols: cols, rows: rows)
+                IshTerminal.shared.resize(id: id, cols: cols, rows: rows)
             }
             replyHandler(["ok": true], nil)
         case "close":
-            // v1: the shared VM keeps running; just detach this panel.
-            if activeId == id { IshTerminal.shared.onOutput = nil; activeId = nil }
+            IshTerminal.shared.close(id: id)
             replyHandler(["ok": true], nil)
         default:
             replyHandler(["ok": false, "error": "unknown op \(op)"], nil)

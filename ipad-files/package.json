@@ -2,7 +2,7 @@
   "name": "ipad-files",
   "displayName": "iPad Local Files",
   "description": "Browse and edit iPad/iCloud local files in code-server, bridged through the native iOS wrapper.",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "publisher": "sister-software",
   "private": true,
   "license": "MIT",
@@ -74,6 +74,11 @@
           "title": "iPad (local)"
         }
       ]
+    },
+    "configurationDefaults": {
+      "terminal.integrated.defaultProfile.osx": "iPad (local)",
+      "terminal.integrated.defaultProfile.linux": "iPad (local)",
+      "terminal.integrated.defaultProfile.windows": "iPad (local)"
     }
   },
   "scripts": {

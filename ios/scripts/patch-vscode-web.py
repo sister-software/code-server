@@ -41,12 +41,9 @@ def write_commit_file(root: Path) -> None:
     print(f"commit {match.group(1)} -> ios-commit.txt")
 
 
-def main() -> None:
-    root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "Vendor/vscode-web"
-    write_commit_file(root)
+def patch_webview(root: Path) -> None:
     page = root / "out/vs/workbench/contrib/webview/browser/pre/index.html"
     html = page.read_text(encoding="utf-8")
-
     if "PATCHED (ios wrapper)" in html:
         print("webview pre/index.html already patched")
         return
@@ -70,6 +67,12 @@ def main() -> None:
 
     page.write_text(html, encoding="utf-8")
     print(f"patched {page} (new CSP hash sha256-{digest})")
+
+
+def main() -> None:
+    root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "Vendor/vscode-web"
+    write_commit_file(root)
+    patch_webview(root)
 
 
 if __name__ == "__main__":

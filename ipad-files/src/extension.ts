@@ -29,6 +29,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   )
 
+  // The iSH profile is made the default via contributes.configurationDefaults,
+  // so + / Terminal ▸ New create it without the profile picker.
+
+  // A pure web workbench has no terminal backend, so the panel is inert until a
+  // terminal exists. Pre-create one (local workbench only) so selecting the
+  // Terminal tab shows a ready shell, like desktop. open()/boot is deferred by
+  // VS Code until the terminal is first revealed.
+  if (!vscode.env.remoteName) {
+    context.subscriptions.push(vscode.window.createTerminal({ name: "iPad", pty: new IpadPty() }))
+  }
+
   // WebKit doesn't fire a `copy`/`cut` DOM event when there's no selection, so
   // VS Code's built-in empty-selection line copy/cut silently does nothing on
   // iPad. These keybindings (active only when the selection is empty) ask the

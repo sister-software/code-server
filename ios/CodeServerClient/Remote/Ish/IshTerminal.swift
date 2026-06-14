@@ -1,44 +1,53 @@
 import Foundation
 
-/// Drives the iSH x86-Linux emulator: boots an Alpine guest once and exposes a
-/// single console wired to the terminal front-end. v1 is one shared console
-/// (one VM, one shell); multiple panels would share it.
+/// Drives the iSH x86-Linux emulator: one Alpine guest, many terminals (the
+/// console for pid 1, pseudo-terminals after). Each VS Code terminal maps to a
+/// numeric id; output is routed back to the matching sink.
 final class IshTerminal {
     static let shared = IshTerminal()
 
-    /// Receives guest console output (already off the emulator thread it fires on).
-    var onOutput: ((Data) -> Void)?
+    /// Per-id output sink. nil data signals the shell exited.
+    private var sinks: [Int32: (Data?) -> Void] = [:]
+    private let lock = NSLock()
 
-    private let bootQueue = DispatchQueue(label: "software.sister.ish.boot")
-    private var booting = false
+    /// Boot/spawn must be serialized: iSH's `current` is thread-local and
+    /// become_new_init_child/do_execve mutate it.
+    private let queue = DispatchQueue(label: "software.sister.ish")
 
-    var isRunning: Bool { ish_is_running() != 0 }
-
-    /// Boot the guest if it isn't already. Idempotent.
-    func ensureBooted() {
-        bootQueue.async { [self] in
-            guard ish_is_running() == 0, !booting else { return }
-            booting = true
-            let root = prepareWritableRootfs()
-            let callback: @convention(c) (UnsafePointer<CChar>?, Int32) -> Void = { buf, len in
-                guard let buf, len > 0 else { return }
-                let data = Data(bytes: buf, count: Int(len))
-                IshTerminal.shared.onOutput?(data)
-            }
-            _ = root.withCString { ish_boot($0, callback) }
-            booting = false
+    private init() {
+        ish_set_output { id, buf, len in
+            let data: Data? = (buf != nil && len > 0) ? Data(bytes: buf!, count: Int(len)) : nil
+            IshTerminal.shared.emit(id: id, data: data)
         }
     }
 
-    func sendInput(_ data: Data) {
+    private func emit(id: Int32, data: Data?) {
+        lock.lock(); let sink = sinks[id]; lock.unlock()
+        sink?(data)
+    }
+
+    func open(id: Int, cols: Int, rows: Int, onOutput: @escaping (Data?) -> Void) {
+        lock.lock(); sinks[Int32(id)] = onOutput; lock.unlock()
+        queue.async {
+            let root = self.prepareWritableRootfs()
+            _ = root.withCString { ish_open_terminal(Int32(id), Int32(cols), Int32(rows), $0) }
+        }
+    }
+
+    func input(id: Int, _ data: Data) {
         guard !data.isEmpty else { return }
         data.withUnsafeBytes { raw in
-            ish_send_input(raw.bindMemory(to: CChar.self).baseAddress, Int32(data.count))
+            ish_send_input(Int32(id), raw.bindMemory(to: CChar.self).baseAddress, Int32(data.count))
         }
     }
 
-    func setWinsize(cols: Int, rows: Int) {
-        ish_set_winsize(Int32(cols), Int32(rows))
+    func resize(id: Int, cols: Int, rows: Int) {
+        ish_set_winsize(Int32(id), Int32(cols), Int32(rows))
+    }
+
+    func close(id: Int) {
+        ish_close_terminal(Int32(id))
+        lock.lock(); sinks[Int32(id)] = nil; lock.unlock()
     }
 
     /// The guest writes to its filesystem, so copy the bundled read-only fakefs
