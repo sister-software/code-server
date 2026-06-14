@@ -57,6 +57,14 @@ final class FileBridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply 
             break
         }
 
+        // iSH guest filesystem ops run on the emulator's serial fs queue.
+        if op.hasPrefix("ish-") {
+            IshTerminal.shared.onFSQueue {
+                reply(Self.handleIshFS(op: op, params: params, dataBase64: dataBase64))
+            }
+            return
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 switch op {
@@ -88,6 +96,56 @@ final class FileBridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply 
             } catch {
                 reply(Self.errorPayload(error))
             }
+        }
+    }
+
+    /// Bridges the ipad-files `ish:` FileSystemProvider to the live Alpine guest
+    /// filesystem via the iSH kernel. Runs on IshTerminal's serial fs queue.
+    private static func handleIshFS(op: String, params: [String: String], dataBase64: String?) -> [String: Any] {
+        guard ish_is_booted() != 0 else { return ["ok": false, "status": 503, "error": "guest not booted"] }
+        let path = params["path"] ?? "/"
+        switch op {
+        case "ish-stat":
+            var isDir: Int32 = 0, size: Int = 0, mtime: Int = 0
+            let rc = path.withCString { ish_fs_stat($0, &isDir, &size, &mtime) }
+            if rc < 0 { return ["ok": false, "status": 404, "error": "not found"] }
+            return ["ok": true, "type": isDir != 0 ? "directory" : "file", "size": size, "mtime": mtime * 1000]
+        case "ish-list":
+            guard let cstr = path.withCString({ ish_fs_list($0) }) else {
+                return ["ok": false, "status": 404, "error": "not a directory"]
+            }
+            defer { ish_free(cstr) }
+            var entries: [[String: String]] = []
+            for line in String(cString: cstr).split(separator: "\n") where line.count > 2 {
+                entries.append(["name": String(line.dropFirst(2)),
+                                "type": line.first == "d" ? "directory" : "file"])
+            }
+            return ["ok": true, "entries": entries]
+        case "ish-read":
+            var len: Int32 = 0
+            guard let buf = path.withCString({ ish_fs_read($0, &len) }) else {
+                return ["ok": false, "status": 404, "error": "read failed"]
+            }
+            defer { ish_free(buf) }
+            return ["ok": true, "bytes": Data(bytes: buf, count: Int(len)).base64EncodedString()]
+        case "ish-write":
+            let data = Data(base64Encoded: dataBase64 ?? "") ?? Data()
+            let rc = data.isEmpty
+                ? path.withCString { ish_fs_write($0, "", 0) }
+                : data.withUnsafeBytes { raw in path.withCString { ish_fs_write($0, raw.baseAddress, Int32(data.count)) } }
+            return rc < 0 ? ["ok": false, "status": 500, "error": "write failed"] : ["ok": true]
+        case "ish-mkdir":
+            return path.withCString { ish_fs_mkdir($0) } < 0
+                ? ["ok": false, "status": 500, "error": "mkdir failed"] : ["ok": true]
+        case "ish-delete":
+            return path.withCString { ish_fs_delete($0) } < 0
+                ? ["ok": false, "status": 500, "error": "delete failed"] : ["ok": true]
+        case "ish-rename":
+            let from = params["from"] ?? "", to = params["to"] ?? ""
+            let rc = from.withCString { f in to.withCString { t in ish_fs_rename(f, t) } }
+            return rc < 0 ? ["ok": false, "status": 500, "error": "rename failed"] : ["ok": true]
+        default:
+            return ["ok": false, "status": 404, "error": "unknown op \(op)"]
         }
     }
 

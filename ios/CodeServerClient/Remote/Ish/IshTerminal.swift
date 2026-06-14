@@ -50,6 +50,12 @@ final class IshTerminal {
         lock.lock(); sinks[Int32(id)] = nil; lock.unlock()
     }
 
+    /// Run guest-fs work on the same serial queue as boot/spawn (iSH's `current`
+    /// is thread-local; fs ops set it to pid 1 and must not race the kernel).
+    func onFSQueue(_ work: @escaping () -> Void) {
+        queue.async(execute: work)
+    }
+
     /// The guest writes to its filesystem, so copy the bundled read-only fakefs
     /// to Application Support on first run and boot from there.
     private func prepareWritableRootfs() -> String {

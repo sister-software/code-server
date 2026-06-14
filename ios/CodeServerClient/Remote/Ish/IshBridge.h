@@ -24,3 +24,26 @@ void ish_set_winsize(int term_id, int cols, int rows);
 
 // Detach a terminal (the guest shell exits on its own when it gets EOF/exit).
 void ish_close_terminal(int term_id);
+
+// --- Guest filesystem access (for mounting the Alpine fs into the editor) ----
+// All paths are absolute guest paths. Require the guest to be booted (a
+// terminal opened at least once). Return 0 / <0 on the int-returning ops.
+
+int ish_is_booted(void);
+
+// stat: is_dir=1 for directories; size/mtime filled. Returns 0 or <0.
+int ish_fs_stat(const char *path, int *is_dir, long *size, long *mtime);
+
+// list: returns a malloc'd, newline-separated "<d|f> <name>" listing (skips
+// . and ..), or NULL. Free with ish_free.
+char *ish_fs_list(const char *path);
+
+// read: returns malloc'd file bytes (sets *len), or NULL. Free with ish_free.
+void *ish_fs_read(const char *path, int *len);
+
+int ish_fs_write(const char *path, const void *buf, int len);
+int ish_fs_mkdir(const char *path);
+int ish_fs_delete(const char *path);            // file or empty dir
+int ish_fs_rename(const char *from, const char *to);
+
+void ish_free(void *p);

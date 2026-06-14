@@ -1,6 +1,7 @@
 import * as vscode from "vscode"
 import { bridge, bridgeLog } from "./bridge"
 import { IpadFileSystemProvider } from "./fileSystemProvider"
+import { IshFileSystemProvider, ISH_SCHEME } from "./ishFileSystemProvider"
 import { IpadPty } from "./terminal"
 
 const SCHEME = "ipadfs"
@@ -14,6 +15,20 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.registerFileSystemProvider(SCHEME, provider, { isCaseSensitive: true }),
   )
   bridgeLog(`registered FileSystemProvider for ${SCHEME}`)
+
+  // The live Alpine guest filesystem (iSH), browsable/editable in the Explorer.
+  context.subscriptions.push(
+    vscode.workspace.registerFileSystemProvider(ISH_SCHEME, new IshFileSystemProvider(), {
+      isCaseSensitive: true,
+    }),
+  )
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ipadFiles.mountAlpine", () => {
+      const uri = vscode.Uri.parse(`${ISH_SCHEME}:/root`)
+      const index = vscode.workspace.workspaceFolders?.length ?? 0
+      vscode.workspace.updateWorkspaceFolders(index, 0, { uri, name: "Alpine (iSH)" })
+    }),
+  )
 
   // Offline terminal: a Pseudoterminal bridged to the native ios_system engine.
   // Available from the terminal-profile dropdown and a command.

@@ -12,8 +12,11 @@
 #include "kernel/fs.h"
 #include "kernel/calls.h"
 #include "kernel/task.h"
+#include "kernel/errno.h"
 #include "fs/tty.h"
 #include "fs/devices.h"
+#include "fs/path.h"
+#include "fs/stat.h"
 
 extern struct tty *pty_open_fake(struct tty_driver *driver);
 
@@ -178,3 +181,103 @@ void ish_close_terminal(int term_id) {
     struct tty *tty = term_tty(term_id);
     if (tty) term_forget(tty);
 }
+
+// --- Guest filesystem access -------------------------------------------------
+
+#define ISH_S_IFMT  0xF000
+#define ISH_S_IFDIR 0x4000
+
+int ish_is_booted(void) { return g_booted; }
+
+// Every fs op runs against pid 1's fs context on the calling (serial) thread.
+static int fs_enter(void) {
+    if (!g_booted) return -1;
+    current = pid_get_task(1);
+    return current ? 0 : -1;
+}
+
+int ish_fs_stat(const char *path, int *is_dir, long *size, long *mtime) {
+    if (fs_enter() < 0) return -1;
+    struct statbuf st;
+    int err = generic_statat(AT_PWD, path, &st, true);
+    if (err < 0) return err;
+    if (is_dir) *is_dir = (st.mode & ISH_S_IFMT) == ISH_S_IFDIR ? 1 : 0;
+    if (size) *size = (long) st.size;
+    if (mtime) *mtime = (long) st.mtime;
+    return 0;
+}
+
+char *ish_fs_list(const char *path) {
+    if (fs_enter() < 0) return NULL;
+    struct fd *dir = generic_open(path, 0 /*O_RDONLY*/, 0);
+    if (IS_ERR(dir)) return NULL;
+
+    size_t cap = 4096, len = 0;
+    char *out = malloc(cap);
+    if (!out) { fd_close(dir); return NULL; }
+
+    struct dir_entry entry;
+    while (dir->ops->readdir(dir, &entry) > 0) {
+        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) continue;
+        char child[4096];
+        snprintf(child, sizeof(child), "%s/%s", path, entry.name);
+        struct statbuf st;
+        char type = 'f';
+        if (generic_statat(AT_PWD, child, &st, false) == 0)
+            type = ((st.mode & ISH_S_IFMT) == ISH_S_IFDIR) ? 'd' : 'f';
+        size_t need = strlen(entry.name) + 4;
+        if (len + need >= cap) { cap *= 2; char *n = realloc(out, cap); if (!n) { free(out); fd_close(dir); return NULL; } out = n; }
+        len += snprintf(out + len, cap - len, "%c %s\n", type, entry.name);
+    }
+    fd_close(dir);
+    out[len] = '\0';
+    return out;
+}
+
+void *ish_fs_read(const char *path, int *len) {
+    if (len) *len = 0;
+    if (fs_enter() < 0) return NULL;
+    struct fd *fd = generic_open(path, 0 /*O_RDONLY*/, 0);
+    if (IS_ERR(fd)) return NULL;
+
+    size_t cap = 65536, total = 0;
+    char *buf = malloc(cap);
+    if (!buf) { fd_close(fd); return NULL; }
+    for (;;) {
+        if (total == cap) { cap *= 2; char *n = realloc(buf, cap); if (!n) { free(buf); fd_close(fd); return NULL; } buf = n; }
+        ssize_t r = fd->ops->read(fd, buf + total, cap - total);
+        if (r <= 0) break;
+        total += (size_t) r;
+    }
+    fd_close(fd);
+    if (len) *len = (int) total;
+    return buf;
+}
+
+int ish_fs_write(const char *path, const void *buf, int len) {
+    if (fs_enter() < 0) return -1;
+    struct fd *fd = generic_open(path, O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0644);
+    if (IS_ERR(fd)) return (int) PTR_ERR(fd);
+    ssize_t w = fd->ops->write(fd, buf, (size_t) len);
+    fd_close(fd);
+    return w < 0 ? (int) w : 0;
+}
+
+int ish_fs_mkdir(const char *path) {
+    if (fs_enter() < 0) return -1;
+    return generic_mkdirat(AT_PWD, path, 0755);
+}
+
+int ish_fs_delete(const char *path) {
+    if (fs_enter() < 0) return -1;
+    int err = generic_unlinkat(AT_PWD, path);
+    if (err == _EISDIR || err == _EPERM) err = generic_rmdirat(AT_PWD, path);
+    return err;
+}
+
+int ish_fs_rename(const char *from, const char *to) {
+    if (fs_enter() < 0) return -1;
+    return generic_renameat(AT_PWD, from, AT_PWD, to);
+}
+
+void ish_free(void *p) { free(p); }
