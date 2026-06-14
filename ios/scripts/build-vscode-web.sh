@@ -24,7 +24,11 @@ rm -rf .pc
 if ls patches/ios-*.diff >/dev/null 2>&1; then
   for p in patches/ios-*.diff; do
     echo "  applying $(basename "$p")"
-    patch -p1 -d lib/vscode < "$p"
+    # The ios-*.diff are quilt-style with repo-root-relative paths
+    # (code-server.orig/lib/vscode/…), so strip one component and apply from the
+    # repo root — NOT `-d lib/vscode`, which would double the lib/vscode prefix
+    # and make patch prompt "File to patch:".
+    patch -p1 < "$p"
   done
 fi
 

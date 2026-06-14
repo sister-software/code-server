@@ -1,21 +1,5 @@
-Enable "Open Folder" on iOS via native bridge
-
-When running inside the iOS wrapper (detected via the `__codeServerBridge`
-injected by bridge.js), route the Open Folder command through the native
-document picker rather than throwing. The bridge call returns a root id
-and display name; we construct an `ipadfs:/<id>/` URI and open it via
-the host service — the same path the simplified dialog uses.
-
-The `OpenFolderWorkspaceSupportContext` context key (which hides the
-Open Folder toolbar button and menu item) is extended to also be true
-when the iOS bridge is available, so the affordance appears in the UI.
-
-This patch follows the same pattern as code-server's
-external-file-actions.diff: a construction-option-free runtime detection
-via platform.ts helpers plus window-level bridge probing.
-
 Index: code-server/lib/vscode/src/vs/workbench/browser/contextkeys.ts
-===================================================================
+index 678a225f1df..714bd059662 100644
 --- code-server.orig/lib/vscode/src/vs/workbench/browser/contextkeys.ts
 +++ code-server/lib/vscode/src/vs/workbench/browser/contextkeys.ts
 @@ -15,7 +15,7 @@ import { IWorkbenchLayoutService, Parts, positionToString } from '../services/la
@@ -37,14 +21,17 @@ Index: code-server/lib/vscode/src/vs/workbench/browser/contextkeys.ts
  
  		// Empty workspace support: empty workspaces require built-in file system
  		// providers to be available that allow to enter a workspace or open loose
-@@ -148,3 +148,3 @@ export class WorkbenchContextKeysHandler extends Disposable {
+@@ -146,7 +147,7 @@ export class WorkbenchContextKeysHandler extends Disposable {
+ 		// - desktop: always
  		// -     web: only when connected to a remote
  		this.emptyWorkspaceSupportContext = EmptyWorkspaceSupportContext.bindTo(this.contextKeyService);
 -		this.emptyWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string');
 +		this.emptyWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string' || hasIOSBridge);
  
+ 		// Entering a multi root workspace support: support for entering a multi-root
+ 		// workspace (e.g. "Open Workspace from File...", "Duplicate Workspace", "Save Workspace")
 Index: code-server/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
-===================================================================
+index f75fa27784e..d5abebec885 100644
 --- code-server.orig/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
 +++ code-server/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
 @@ -20,6 +20,7 @@ import { extractFileListData } from '../../../../platform/dnd/browser/dnd.js';
