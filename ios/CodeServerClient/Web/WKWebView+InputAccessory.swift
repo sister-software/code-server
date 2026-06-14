@@ -23,6 +23,39 @@ extension WKWebView {
         return nil
     }
 
+    /// Strips the iOS selection edit-menu noise (Writing Tools, AutoFill, Look
+    /// Up, Translate, Share, …) from the web content view's callout menu, which
+    /// otherwise stacks on top of VS Code's own DOM context menu. Cut/Copy/Paste
+    /// (the standard edit group) are kept so the clipboard still works.
+    static func trimEditMenuGlobally() {
+        guard let contentViewClass = NSClassFromString("WKContentView") else { return }
+        let selector = #selector(UIResponder.buildMenu(with:))
+        guard let template = class_getInstanceMethod(UIResponder.self, selector) else { return }
+
+        typealias Build = @convention(c) (AnyObject, Selector, UIMenuBuilder) -> Void
+        let original = unsafeBitCast(method_getImplementation(template), to: Build.self)
+
+        // Public identifiers + string identifiers for the iOS 18 additions.
+        let drop: [UIMenu.Identifier] = [
+            .lookup, .learn, .share, .replace, .textStyle, .speech,
+            .spelling, .substitutions, .transformations,
+            UIMenu.Identifier("com.apple.menu.writing-tools"),
+            UIMenu.Identifier("com.apple.menu.autofill"),
+            UIMenu.Identifier("com.apple.menu.format"),
+        ]
+        let block: @convention(block) (AnyObject, UIMenuBuilder) -> Void = { receiver, builder in
+            original(receiver, selector, builder)
+            for id in drop { builder.remove(menu: id) }
+        }
+        let implementation = imp_implementationWithBlock(block)
+        let typeEncoding = method_getTypeEncoding(template)
+        if !class_addMethod(contentViewClass, selector, implementation, typeEncoding) {
+            if let existing = class_getInstanceMethod(contentViewClass, selector) {
+                method_setImplementation(existing, implementation)
+            }
+        }
+    }
+
     /// Removes the floating input accessory / assistant bar (the prev-next arrows
     /// + dictation pill) from every WKWebView by overriding `inputAccessoryView`
     /// on the private `WKContentView` class to return nil.

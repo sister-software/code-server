@@ -412,6 +412,17 @@ extension WebViewController: WKNavigationDelegate {
 // MARK: - Popups (OAuth: GitHub sign-in, Settings Sync, Cloudflare Access)
 
 extension WebViewController: WKUIDelegate {
+    // Right-click / two-finger tap: suppress WebKit's native element context
+    // menu so only VS Code's own DOM context menu shows (no doubled-up iOS
+    // menu). The editor handles `contextmenu` itself.
+    func webView(
+        _ webView: WKWebView,
+        contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
+        completionHandler: @escaping (UIContextMenuConfiguration?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
