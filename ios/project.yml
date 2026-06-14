@@ -131,8 +131,8 @@ targets:
           - "LOG_HANDLER_DPRINTF=1"
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
-          - "$(SRCROOT)/Vendor/ios-linuxkit"
-          - "$(SRCROOT)/Vendor/ios-linuxkit/build-ios"
+          - "$(SRCROOT)/Vendor/ish-arm64"
+          - "$(SRCROOT)/Vendor/ish-arm64/build-ios"
         # iSH archives have circular inter-dependencies; force-load so the
         # linker resolves across them. The libs are platform-specific Mach-O
         # (iphoneos vs iphonesimulator), so pick the matching set per SDK — the

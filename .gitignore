@@ -28,4 +28,4 @@ lib/vscode-web/
 ios/Vendor/ish/
 ios/CodeServerClient/Remote/Ish/**/*.a
 ios/Vendor/ish-rootfs/
-ios/Vendor/ios-linuxkit/
+ios/Vendor/ish-arm64/

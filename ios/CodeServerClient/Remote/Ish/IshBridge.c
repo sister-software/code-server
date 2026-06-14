@@ -21,9 +21,9 @@
 
 #define ISH_S_IFCHR 0x2000
 
-// ios-linuxkit (ish-arm64) dropped create_some_device_nodes(); the app creates
-// the device nodes inline. Replicate the essential ones (console/tty/pts +
-// null/zero/random) so programs that need them work.
+// ish-arm64 has no create_some_device_nodes() helper; the app (AppDelegate.m)
+// creates the device nodes inline. Replicate the essential ones (console/tty/pts
+// + null/zero/random) so programs that need them work.
 static void create_device_nodes(void) {
     for (int i = 1; i <= 7; i++) {
         char p[16];
