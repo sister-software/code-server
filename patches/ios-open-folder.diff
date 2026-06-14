@@ -1,0 +1,76 @@
+Enable "Open Folder" on iOS via native bridge
+
+When running inside the iOS wrapper (detected via the `__codeServerBridge`
+injected by bridge.js), route the Open Folder command through the native
+document picker rather than throwing. The bridge call returns a root id
+and display name; we construct an `ipadfs:/<id>/` URI and open it via
+the host service — the same path the simplified dialog uses.
+
+The `OpenFolderWorkspaceSupportContext` context key (which hides the
+Open Folder toolbar button and menu item) is extended to also be true
+when the iOS bridge is available, so the affordance appears in the UI.
+
+This patch follows the same pattern as code-server's
+external-file-actions.diff: a construction-option-free runtime detection
+via platform.ts helpers plus window-level bridge probing.
+
+Index: code-server/lib/vscode/src/vs/workbench/browser/contextkeys.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/browser/contextkeys.ts
++++ code-server/lib/vscode/src/vs/workbench/browser/contextkeys.ts
+@@ -15,7 +15,7 @@ import { IWorkbenchLayoutService, Parts, positionToString } from '../services/la
+ import { getRemoteName } from '../../platform/remote/common/remoteHosts.js';
+ import { getVirtualWorkspaceScheme } from '../../platform/workspace/common/virtualWorkspace.js';
+ import { IWorkingCopyService } from '../services/workingCopy/common/workingCopyService.js';
+-import { isNative } from '../../base/common/platform.js';
++import { isNative, isIOS } from '../../base/common/platform.js';
+ import { WebFileSystemAccess } from '../../platform/files/browser/webFileSystemAccess.js';
+ import { IProductService } from '../../platform/product/common/productService.js';
+ import { getTitleBarStyle } from '../../platform/window/common/window.js';
+@@ -138,7 +138,8 @@ export class WorkbenchContextKeysHandler extends Disposable {
+ 		// (e.g. "Open Folder...") is limited in web when not connected
+ 		// to a remote.
+ 		this.openFolderWorkspaceSupportContext = OpenFolderWorkspaceSupportContext.bindTo(this.contextKeyService);
+-		this.openFolderWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string');
++		const hasIOSBridge = isIOS && typeof (window as any).__codeServerBridge?.pickFolder === 'function';
++		this.openFolderWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string' || hasIOSBridge);
+ 
+ 		// Empty workspace support: empty workspaces require built-in file system
+ 		// providers to be available that allow to enter a workspace or open loose
+@@ -148,3 +148,3 @@ export class WorkbenchContextKeysHandler extends Disposable {
+ 		// -     web: only when connected to a remote
+ 		this.emptyWorkspaceSupportContext = EmptyWorkspaceSupportContext.bindTo(this.contextKeyService);
+-		this.emptyWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string');
++		this.emptyWorkspaceSupportContext.set(isNative || typeof this.environmentService.remoteAuthority === 'string' || hasIOSBridge);
+ 
+Index: code-server/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
++++ code-server/lib/vscode/src/vs/workbench/services/dialogs/browser/fileDialogService.ts
+@@ -20,6 +20,7 @@ import { extractFileListData } from '../../../../platform/dnd/browser/dnd.js';
+ import { Iterable } from '../../../../base/common/iterator.js';
+ import { WebFileSystemAccess } from '../../../../platform/files/browser/webFileSystemAccess.js';
+ import { EmbeddedCodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/embeddedCodeEditorWidget.js';
++import { isIOS } from '../../../../base/common/platform.js';
+ 
+ export class FileDialogService extends AbstractFileDialogService implements IFileDialogService {
+ 
+@@ -92,6 +93,18 @@ export class FileDialogService extends AbstractFileDialogService implements IFil
+ 			return super.pickFolderAndOpenSimplified(schema, options);
+ 		}
+ 
++		// iOS: use the native document picker via the wrapper bridge when
++		// running inside the native iOS shell (detected at document-start by
++		// bridge.js).
++		if (isIOS) {
++			const bridge = (window as any).__codeServerBridge;
++			if (bridge?.pickFolder) {
++				const result = await bridge.pickFolder();
++				if (result?.ok && result.id) {
++					return this.hostService.openWindow([{ folderUri: URI.parse(`ipadfs:/${result.id}/`) }], { forceNewWindow: options.forceNewWindow });
++				}
++			}
++		}
+ 		throw new Error(localize('pickFolderAndOpen', "Can't open folders, try adding a folder to the workspace instead."));
+ 	}
+ 

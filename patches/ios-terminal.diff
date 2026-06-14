@@ -1,0 +1,229 @@
+Index: code-server/lib/vscode/src/vs/workbench/contrib/terminal/browser/iosTerminalBackend.ts
+===================================================================
+--- /dev/null
++++ code-server/lib/vscode/src/vs/workbench/contrib/terminal/browser/iosTerminalBackend.ts
+@@ -0,0 +1,204 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { DeferredPromise } from '../../../../base/common/async.js';
++import { Emitter, Event } from '../../../../base/common/event.js';
++import { IProcessEnvironment, OperatingSystem } from '../../../../base/common/platform.js';
++import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
++import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
++import { Registry } from '../../../../platform/registry/common/platform.js';
++import { IStorageService } from '../../../../platform/storage/common/storage.js';
++import { IProcessPropertyMap, IPtyHostLatencyMeasurement, IShellLaunchConfig, ITerminalBackend, ITerminalBackendRegistry, ITerminalChildProcess, ITerminalLaunchError, ITerminalLaunchResult, ITerminalLogService, ITerminalProcessOptions, ITerminalProfile, ITerminalsLayoutInfo, ITerminalsLayoutInfoById, ProcessPropertyType, TerminalExtensions, TerminalIcon, TitleEventSource } from '../../../../platform/terminal/common/terminal.js';
++import { IProcessDetails } from '../../../../platform/terminal/common/terminalProcess.js';
++import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
++import { IWorkbenchContribution } from '../../../common/contributions.js';
++import { BaseTerminalBackend } from './baseTerminalBackend.js';
++import { BasePty } from '../common/basePty.js';
++import { ITerminalInstanceService } from './terminal.js';
++import { IConfigurationResolverService } from '../../../services/configurationResolver/common/configurationResolver.js';
++import { IHistoryService } from '../../../services/history/common/history.js';
++import { IStatusbarService } from '../../../services/statusbar/browser/statusbar.js';
++
++interface IosBridge {
++	postMessage(msg: Record<string, unknown>): Promise<Record<string, unknown>>;
++}
++
++function iosBridge(): IosBridge | undefined {
++	const w = window as unknown as { webkit?: { messageHandlers?: { terminal?: IosBridge } } };
++	return w.webkit?.messageHandlers?.terminal;
++}
++
++function iosInputBridge(): { postMessage(msg: Record<string, unknown>): void } | undefined {
++	const w = window as unknown as { webkit?: { messageHandlers?: { terminalInput?: { postMessage(msg: Record<string, unknown>): void } } } };
++	return w.webkit?.messageHandlers?.terminalInput;
++}
++
++class IosPty extends BasePty implements ITerminalChildProcess {
++	private _started = false;
++
++	constructor(
++		id: number,
++		shouldPersist: boolean,
++		private readonly _cols: number,
++		private readonly _rows: number,
++		@ITerminalLogService _logService: ITerminalLogService,
++	) {
++		super(id, shouldPersist);
++	}
++
++	async start(): Promise<ITerminalLaunchError | ITerminalLaunchResult | undefined> {
++		if (this._started) { return undefined; }
++
++		IosTerminalBackend._onData(this.id, (data: string) => this.handleData(data));
++		IosTerminalBackend._onExit(this.id, (_code: number) => {
++			this.handleExit(_code);
++			this.dispose();
++		});
++
++		const bridge = iosBridge();
++		if (!bridge) {
++			return { message: 'ios terminal bridge unavailable' };
++		}
++		const result = await bridge.postMessage({
++			op: 'terminal-open',
++			id: this.id, cols: this._cols, rows: this._rows
++		});
++
++		if (!result?.ok) {
++			return { message: (result?.error as string) || 'terminal-open failed' };
++		}
++
++		this._started = true;
++		return undefined;
++	}
++
++	input(data: string): void {
++		iosInputBridge()?.postMessage({ op: 'terminal-input', id: this.id, data });
++	}
++
++	resize(cols: number, rows: number): void {
++		iosInputBridge()?.postMessage({ op: 'terminal-resize', id: this.id, cols, rows });
++	}
++
++	shutdown(_immediate: boolean): void {
++		iosBridge()?.postMessage({ op: 'terminal-close', id: this.id });
++		this.dispose();
++	}
++
++	sendSignal(_signal: string): void { /* no-op */ }
++
++	processBinary(_e: string): Promise<void> { return Promise.resolve(); }
++	async clearBuffer(): Promise<void> {}
++	async acknowledgeDataEvent(_charCount: number): Promise<void> {}
++	async setUnicodeVersion(_version: '6' | '11'): Promise<void> {}
++	async refreshProperty<T extends ProcessPropertyType>(_type: T): Promise<IProcessPropertyMap[T]> { throw new Error('not supported'); }
++	async updateProperty<T extends ProcessPropertyType>(_type: T, _value: IProcessPropertyMap[T]): Promise<void> {}
++}
++
++class IosTerminalBackend extends BaseTerminalBackend implements ITerminalBackend {
++	readonly remoteAuthority: string | undefined = undefined;
++
++	private static _dataSubs = new Map<number, (data: string) => void>();
++	private static _exitSubs = new Map<number, (code: number) => void>();
++	private static _inited = false;
++
++	private readonly _whenReady = new DeferredPromise<void>();
++	get whenReady(): Promise<void> { return this._whenReady.p; }
++	setReady(): void { this._whenReady.complete(); }
++
++	private readonly _ptys: Map<number, IosPty> = new Map();
++	private readonly _onDidRequestDetach = this._register(new Emitter<{ requestId: number; workspaceId: string; instanceId: number }>());
++	readonly onDidRequestDetach = this._onDidRequestDetach.event;
++
++	constructor(
++		@IInstantiationService private readonly _instantiationService: IInstantiationService,
++		@ITerminalLogService logService: ITerminalLogService,
++		@ICommandService _commandService: ICommandService,
++		@IStorageService _storageService: IStorageService,
++		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
++		@IConfigurationResolverService configurationResolverService: IConfigurationResolverService,
++		@IHistoryService historyService: IHistoryService,
++		@IConfigurationService _configurationService: IConfigurationService,
++		@IStatusbarService statusBarService: IStatusbarService,
++	) {
++		const stub = { onPtyHostExit: Event.None, onPtyHostStart: Event.None, onPtyHostUnresponsive: Event.None, onPtyHostResponsive: Event.None, onPtyHostRequestResolveVariables: Event.None, restartPtyHost: async () => {}, acceptPtyHostResolvedVariables: async () => {}, getProfiles: async () => [] as ITerminalProfile[] };
++		super(stub, logService, historyService, configurationResolverService, statusBarService, workspaceContextService);
++	}
++
++	static initBridge(): void {
++		if (IosTerminalBackend._inited) { return; }
++		IosTerminalBackend._inited = true;
++		const w = window as unknown as Record<string, unknown>;
++		w.__codeServerBridgeTerminal = {
++			onData(id: number, data: string) {
++				IosTerminalBackend._dataSubs.get(id)?.(data);
++			},
++			onExit(id: number, code: number) {
++				IosTerminalBackend._exitSubs.get(id)?.(code);
++				IosTerminalBackend._dataSubs.delete(id);
++				IosTerminalBackend._exitSubs.delete(id);
++			}
++		};
++	}
++
++	static _onData(id: number, cb: (data: string) => void): void { IosTerminalBackend._dataSubs.set(id, cb); }
++	static _onExit(id: number, cb: (code: number) => void): void { IosTerminalBackend._exitSubs.set(id, cb); }
++
++	async createProcess(
++		_shellLaunchConfig: IShellLaunchConfig,
++		_cwd: string,
++		cols: number,
++		rows: number,
++		_unicodeVersion: '6' | '11',
++		_env: IProcessEnvironment,
++		_options: ITerminalProcessOptions,
++		shouldPersist: boolean,
++	): Promise<ITerminalChildProcess> {
++		const id = this._ptys.size + 1;
++		const pty = this._instantiationService.createInstance(IosPty, id, shouldPersist, cols, rows);
++		this._ptys.set(id, pty);
++		return pty;
++	}
++
++	async installAutoReply(_match: string, _reply: string): Promise<void> {}
++	async uninstallAllAutoReplies(): Promise<void> {}
++
++	attachToProcess(_id: number): Promise<ITerminalChildProcess | undefined> { return Promise.resolve(undefined); }
++	attachToRevivedProcess(_id: number): Promise<ITerminalChildProcess | undefined> { return Promise.resolve(undefined); }
++	listProcesses(): Promise<IProcessDetails[]> { return Promise.resolve([]); }
++	getLatency(): Promise<IPtyHostLatencyMeasurement[]> { return Promise.resolve([]); }
++	getDefaultSystemShell(_osOverride?: OperatingSystem): Promise<string> { return Promise.resolve('shell'); }
++	getProfiles(_profiles: unknown, _defaultProfile: unknown, _includeDetectedProfiles?: boolean): Promise<ITerminalProfile[]> { return Promise.resolve([]); }
++	getWslPath(_original: string, _direction: 'unix-to-win' | 'win-to-unix'): Promise<string> { return Promise.resolve(''); }
++	getEnvironment(): Promise<IProcessEnvironment> { return Promise.resolve({}); }
++	getShellEnvironment(): Promise<IProcessEnvironment | undefined> { return Promise.resolve(undefined); }
++	setTerminalLayoutInfo(_layoutInfo?: ITerminalsLayoutInfoById): Promise<void> { return Promise.resolve(); }
++	updateTitle(_id: number, _title: string, _titleSource: TitleEventSource): Promise<void> { return Promise.resolve(); }
++	updateIcon(_id: number, _userInitiated: boolean, _icon: TerminalIcon, _color?: string): Promise<void> { return Promise.resolve(); }
++	setNextCommandId(_id: number, _commandLine: string, _commandId: string): Promise<void> { return Promise.resolve(); }
++	getTerminalLayoutInfo(): Promise<ITerminalsLayoutInfo | undefined> { return Promise.resolve(undefined); }
++	getPerformanceMarks(): Promise<PerformanceMark[]> { return Promise.resolve([]); }
++	reduceConnectionGraceTime(): Promise<void> { return Promise.resolve(); }
++	requestDetachInstance(_workspaceId: string, _instanceId: number): Promise<IProcessDetails | undefined> { return Promise.resolve(undefined); }
++	acceptDetachInstanceReply(_requestId: number, _persistentProcessId?: number): Promise<void> { return Promise.resolve(); }
++	persistTerminalState(): Promise<void> { return Promise.resolve(); }
++}
++
++export class IosTerminalBackendContribution implements IWorkbenchContribution {
++	static readonly ID = 'iosTerminalBackend';
++
++	constructor(
++		@IInstantiationService instantiationService: IInstantiationService,
++		@ITerminalInstanceService terminalInstanceService: ITerminalInstanceService
++	) {
++		if (iosBridge() && (window as unknown as Record<string, unknown>).__codeServerBridge) {
++			IosTerminalBackend.initBridge();
++			const backend = instantiationService.createInstance(IosTerminalBackend);
++			Registry.as<ITerminalBackendRegistry>(TerminalExtensions.Backend).registerTerminalBackend(backend);
++			terminalInstanceService.didRegisterBackend(backend);
++		}
++	}
++}
+Index: code-server/lib/vscode/src/vs/workbench/contrib/terminal/browser/terminal.web.contribution.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/contrib/terminal/browser/terminal.web.contribution.ts
++++ code-server/lib/vscode/src/vs/workbench/contrib/terminal/browser/terminal.web.contribution.ts
+@@ -6,6 +6,7 @@
+ import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+ import { KeybindingWeight, KeybindingsRegistry } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+ import { ITerminalProfileResolverService, TerminalCommandId } from '../common/terminal.js';
++import { IosTerminalBackendContribution } from './iosTerminalBackend.js';
+ import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
+ import { BrowserTerminalProfileResolverService } from './terminalProfileResolverService.js';
+ import { TerminalContextKeys } from '../common/terminalContextKey.js';
+@@ -20,3 +21,7 @@ KeybindingsRegistry.registerKeybindingRu
+ 	when: TerminalContextKeys.notFocus,
+ 	primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyC
+ });
++
++// iOS: register the native terminal backend when running inside the wrapper.
++import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
++registerWorkbenchContribution2(IosTerminalBackendContribution.ID, IosTerminalBackendContribution, WorkbenchPhase.AfterRestored);

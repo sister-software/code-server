@@ -1,0 +1,47 @@
+Enumerate installed fonts on iOS via native bridge
+
+On iOS/iPadOS, WKWebView does not support the Browser Font Access API
+(queryLocalFonts), so getFontSnippets() returns [] — leaving the
+editor.fontFamily and terminal.integrated.fontFamily settings without
+autocomplete.
+
+When the iOS wrapper bridge is available, call listFonts() to query
+UIFont.familyNames (which includes both system and user-installed fonts
+on iOS). The returned families are formatted as IJSONSchemaSnippets for
+the settings autocomplete.
+
+Note: actual font rendering works automatically — WKWebView sees all
+installed system fonts via CSS `font-family`, no @font-face needed.
+This patch only enables the setting autocomplete.
+
+Index: code-server/lib/vscode/src/vs/base/browser/fonts.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/base/browser/fonts.ts
++++ code-server/lib/vscode/src/vs/base/browser/fonts.ts
+@@ -5,7 +5,7 @@
+ 
+ import { mainWindow } from './window.js';
+ import type { IJSONSchemaSnippet } from '../common/jsonSchema.js';
+-import { isElectron, isMacintosh, isWindows } from '../common/platform.js';
++import { isElectron, isIOS, isMacintosh, isWindows } from '../common/platform.js';
+ 
+ /**
+  * The best font-family to be used in CSS based on the platform:
+@@ -37,7 +37,16 @@ export const getFonts = async (): Promise<string[]> => {
+ 
+ export const getFontSnippets = async (): Promise<IJSONSchemaSnippet[]> => {
+ 	if (!isElectron) {
+-		return [];
++		// iOS: enumerate installed fonts via the native wrapper bridge.
++		// WKWebView renders all installed system fonts via CSS font-family
++		// automatically; this just enables the settings autocomplete.
++		if (isIOS && typeof (window as any).__codeServerBridge?.listFonts === 'function') {
++			const fonts: string[] = await (window as any).__codeServerBridge.listFonts();
++			return fonts.map(font => ({
++				body: `${font}`
++			}));
++		}
++		return [];
+ 	}
+ 	const fonts = await getFonts();
+ 	const snippets: IJSONSchemaSnippet[] = fonts.map(font => {

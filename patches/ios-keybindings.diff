@@ -1,0 +1,39 @@
+Enforce browser-conflict keybinding filtering on iOS
+
+On iPadOS, WKWebView exposes navigator.keyboard causing BrowserFeatures
+to report FullScreen keyboard support. This causes _assertBrowserConflicts
+to skip all filtering, since it assumes fullscreen mode means system
+shortcuts are available. But iOS still reserves Cmd+Space, Cmd+H, and
+Cmd+Tab at the system level — VS Code never sees them, yet keybindings
+bound to those combos would silently fail.
+
+Always enforce the browser-conflict filter on iOS regardless of the
+KeyboardSupport level. This matches what the filter already does in
+non-iOS web contexts (it blocks Cmd+Arrow and Cmd+Digit to prevent
+browser chrome from intercepting them).
+
+Index: code-server/lib/vscode/src/vs/workbench/services/keybinding/browser/keybindingService.ts
+===================================================================
+--- code-server.orig/lib/vscode/src/vs/workbench/services/keybinding/browser/keybindingService.ts
++++ code-server/lib/vscode/src/vs/workbench/services/keybinding/browser/keybindingService.ts
+@@ -22,6 +22,6 @@ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../..
+ import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+ import * as objects from '../../../../base/common/objects.js';
+-import { isMacintosh, OperatingSystem, OS } from '../../../../base/common/platform.js';
++import { isIOS, isMacintosh, OperatingSystem, OS } from '../../../../base/common/platform.js';
+ import { dirname } from '../../../../base/common/resources.js';
+ 
+ // platform
+@@ -500,7 +500,11 @@ export class WorkbenchKeybindingService
+ 	}
+ 
+ 	private _assertBrowserConflicts(keybinding: Keybinding): boolean {
+-		if (BrowserFeatures.keyboard === KeyboardSupport.Always) {
++		// On iOS, WKWebView exposes navigator.keyboard causing
++		// BrowserFeatures.keyboard to resolve to FullScreen even though
++		// iOS System owns Cmd+Space, Cmd+H, Cmd+Tab. Always enforce
++		// browser-conflict filtering on iOS.
++		if (!isIOS && BrowserFeatures.keyboard === KeyboardSupport.Always) {
+ 			return false;
+ 		}
+ 		if (BrowserFeatures.keyboard === KeyboardSupport.FullScreen && browser.isFullscreen(mainWindow)) {
