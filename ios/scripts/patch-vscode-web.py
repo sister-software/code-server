@@ -35,10 +35,21 @@ def write_commit_file(root: Path) -> None:
     vscode-server keyed by it (the remote protocol requires matching commits)."""
     main_js = (root / "out/vs/workbench/workbench.web.main.internal.js").read_text(encoding="utf-8")
     match = re.search(r'commit:"([0-9a-f]{40})"', main_js)
-    if not match:
-        sys.exit("could not find commit hash in workbench.web.main.internal.js")
-    (root / "ios-commit.txt").write_text(match.group(1), encoding="utf-8")
-    print(f"commit {match.group(1)} -> ios-commit.txt")
+    if match:
+        commit = match.group(1)
+    else:
+        # Source builds embed no commit; use the lib/vscode submodule HEAD (the
+        # upstream microsoft/vscode commit), which is what MS serves a
+        # vscode-server for and what the workbench's commit is set to at runtime.
+        import subprocess
+        repo = Path(__file__).resolve().parent.parent.parent
+        commit = subprocess.check_output(
+            ["git", "-C", str(repo / "lib/vscode"), "rev-parse", "HEAD"]
+        ).decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        sys.exit("could not determine vscode commit")
+    (root / "ios-commit.txt").write_text(commit, encoding="utf-8")
+    print(f"commit {commit} -> ios-commit.txt")
 
 
 def patch_webview(root: Path) -> None:

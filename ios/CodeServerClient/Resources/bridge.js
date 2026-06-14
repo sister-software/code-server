@@ -19,6 +19,24 @@
 
   window.__codeServerBridgeInstalled = true
 
+  // Capture the first uncaught error / rejection so Diagnostics can surface
+  // boot failures (white screen) without a tethered Web Inspector.
+  if (!window.__lastError) {
+    window.__lastError = null
+    window.addEventListener("error", function (e) {
+      if (window.__lastError) return
+      window.__lastError =
+        (e.message || "error") + " @ " + (e.filename || "?") + ":" + (e.lineno || 0) +
+        (e.error && e.error.stack ? "\n" + String(e.error.stack).slice(0, 500) : "")
+    })
+    window.addEventListener("unhandledrejection", function (e) {
+      if (window.__lastError) return
+      var r = e.reason
+      window.__lastError = "rejection: " + (r && r.message ? r.message : String(r)) +
+        (r && r.stack ? "\n" + String(r.stack).slice(0, 500) : "")
+    })
+  }
+
   // --- Clipboard: round-trip navigator.clipboard through UIPasteboard ----------
   //
   // WKWebView cripples programmatic navigator.clipboard access (especially reads),

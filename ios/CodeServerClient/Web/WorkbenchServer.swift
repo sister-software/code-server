@@ -131,20 +131,27 @@ final class WorkbenchServer {
             return HTTPResponse(statusCode: .notFound)
         }
 
+        var product: [String: Any] = [
+            "nameShort": "Code (iPad)",
+            "nameLong": "Code on iPad",
+            "applicationName": "code-ipad",
+            "embedderIdentifier": "ios-wrapper",
+            "extensionsGallery": Self.extensionsGallery,
+            // Null out the compiled-in vscode-cdn.net templates so the
+            // extension host iframe and webviews stay on OUR origin: the
+            // ipad-files bridge is BroadcastChannel-based (same-origin
+            // only), and same-origin webviews work offline.
+            "webEndpointUrlTemplate": NSNull(),
+            "webviewContentExternalBaseUrlTemplate": NSNull(),
+        ]
+        // The source-built workbench embeds no commit; set it so the SSH remote
+        // protocol matches the vscode-server we download for this commit.
+        if let commit = Self.vscodeCommit {
+            product["commit"] = commit
+        }
+
         var configuration: [String: Any] = [
-            "productConfiguration": [
-                "nameShort": "Code (iPad)",
-                "nameLong": "Code on iPad",
-                "applicationName": "code-ipad",
-                "embedderIdentifier": "ios-wrapper",
-                "extensionsGallery": Self.extensionsGallery,
-                // Null out the compiled-in vscode-cdn.net templates so the
-                // extension host iframe and webviews stay on OUR origin: the
-                // ipad-files bridge is BroadcastChannel-based (same-origin
-                // only), and same-origin webviews work offline.
-                "webEndpointUrlTemplate": NSNull(),
-                "webviewContentExternalBaseUrlTemplate": NSNull(),
-            ],
+            "productConfiguration": product,
             "additionalBuiltinExtensions": [
                 ["scheme": "http", "authority": "localhost:\(Self.port)", "path": "/ipad-files"],
             ],

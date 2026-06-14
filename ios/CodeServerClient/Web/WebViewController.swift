@@ -317,6 +317,7 @@ final class WebViewController: UIViewController {
         let swRegs = 'n/a'
         try { swRegs = sw ? (await sw.getRegistrations()).length : 'no sw' } catch (e) { swRegs = String(e).slice(0, 80) }
         return JSON.stringify({
+          lastError: window.__lastError || 'none',
           url: location.href.slice(0, 100),
           secureContext: window.isSecureContext,
           cryptoSubtle: !!(crypto && crypto.subtle),
