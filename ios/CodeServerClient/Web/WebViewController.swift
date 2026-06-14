@@ -112,6 +112,10 @@ final class WebViewController: UIViewController {
         webView.underPageBackgroundColor = .systemBackground
         webView.backgroundColor = .systemBackground
         webView.scrollView.backgroundColor = .systemBackground
+        // Non-opaque so the systemBackground shows through the brief blank while a
+        // page (re)loads — e.g. switching workspaces — instead of WebKit's default
+        // white flash. The workbench paints its own opaque theme once it's up.
+        webView.isOpaque = false
         if #available(iOS 16.4, *) {
             webView.isInspectable = true // debug the live page via Safari Web Inspector
         }
