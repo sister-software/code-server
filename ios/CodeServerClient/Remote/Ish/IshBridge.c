@@ -15,8 +15,31 @@
 #include "kernel/errno.h"
 #include "fs/tty.h"
 #include "fs/devices.h"
+#include "fs/dev.h"
 #include "fs/path.h"
 #include "fs/stat.h"
+
+#define ISH_S_IFCHR 0x2000
+
+// ios-linuxkit (ish-arm64) dropped create_some_device_nodes(); the app creates
+// the device nodes inline. Replicate the essential ones (console/tty/pts +
+// null/zero/random) so programs that need them work.
+static void create_device_nodes(void) {
+    for (int i = 1; i <= 7; i++) {
+        char p[16];
+        snprintf(p, sizeof(p), "/dev/tty%d", i);
+        generic_mknodat(AT_PWD, p, ISH_S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, i));
+    }
+    generic_mknodat(AT_PWD, "/dev/tty", ISH_S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_TTY_MINOR));
+    generic_mknodat(AT_PWD, "/dev/console", ISH_S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_CONSOLE_MINOR));
+    generic_mknodat(AT_PWD, "/dev/ptmx", ISH_S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_PTMX_MINOR));
+    generic_mknodat(AT_PWD, "/dev/null", ISH_S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_NULL_MINOR));
+    generic_mknodat(AT_PWD, "/dev/zero", ISH_S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_ZERO_MINOR));
+    generic_mknodat(AT_PWD, "/dev/full", ISH_S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_FULL_MINOR));
+    generic_mknodat(AT_PWD, "/dev/random", ISH_S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_RANDOM_MINOR));
+    generic_mknodat(AT_PWD, "/dev/urandom", ISH_S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_URANDOM_MINOR));
+    generic_mkdirat(AT_PWD, "/dev/pts", 0755);
+}
 
 extern struct tty *pty_open_fake(struct tty_driver *driver);
 
@@ -115,7 +138,7 @@ static int boot_kernel(const char *fakefs_dir, int first_id, int cols, int rows)
     if (err < 0) return err;
     err = become_first_process();
     if (err < 0) return err;
-    create_some_device_nodes();
+    create_device_nodes();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     configure_dns();

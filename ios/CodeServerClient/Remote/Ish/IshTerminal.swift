@@ -61,7 +61,9 @@ final class IshTerminal {
     private func prepareWritableRootfs() -> String {
         let fm = FileManager.default
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dest = support.appendingPathComponent("ish-rootfs", isDirectory: true)
+        // Versioned: bumping forces a fresh copy when the bundled rootfs changes
+        // (e.g. i386 → arm64), instead of reusing a stale writable copy.
+        let dest = support.appendingPathComponent("ish-rootfs-arm64", isDirectory: true)
         if !fm.fileExists(atPath: dest.appendingPathComponent("meta.db").path) {
             try? fm.createDirectory(at: support, withIntermediateDirectories: true)
             try? fm.removeItem(at: dest)

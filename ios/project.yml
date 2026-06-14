@@ -75,10 +75,21 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: CodeServerClient/ios_system-Bridging-Header.h
         SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
         GCC_C_LANGUAGE_STANDARD: gnu11
+        # App icon lives in Assets.xcassets/AppIcon.appiconset (single 1024 px,
+        # no alpha — iOS down-samples the rest).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # iSH/ios-linuxkit headers select the guest backend + engine via these
+        # macros (mirrors the meson add_project_arguments). GUEST_ARM64 picks the
+        # AArch64 cpu/state headers; without it emu/cpu.h #errors out.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "GUEST_ARM64=1"
+          - "ENGINE_ASBESTOS=1"
+          - "LOG_HANDLER_DPRINTF=1"
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
-          - "$(SRCROOT)/Vendor/ish"
-          - "$(SRCROOT)/Vendor/ish/build-ios"
+          - "$(SRCROOT)/Vendor/ios-linuxkit"
+          - "$(SRCROOT)/Vendor/ios-linuxkit/build-ios"
         # iSH archives have circular inter-dependencies; force-load so the
         # linker resolves across them.
         OTHER_LDFLAGS:

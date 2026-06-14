@@ -1,0 +1,45 @@
+diff --git a/asbestos/guest-arm64/gadgets-aarch64/bits.S b/asbestos/guest-arm64/gadgets-aarch64/bits.S
+index fdc8f22..ecc5147 100644
+--- a/asbestos/guest-arm64/gadgets-aarch64/bits.S
++++ b/asbestos/guest-arm64/gadgets-aarch64/bits.S
+@@ -103,22 +103,10 @@
+     mov _tmp, x0
+     gret
+ 
+-// SXTW Xd, Wn - Sign extend word
+-.gadget sxtw
+-    sxtw _tmp, w0
+-    gret
+-
+-// UXTB Xd, Wn - Zero extend byte
+-.gadget uxtb
+-    uxtb w0, w0
+-    mov _tmp, x0
+-    gret
+-
+-// UXTH Xd, Wn - Zero extend halfword
+-.gadget uxth
+-    uxth w0, w0
+-    mov _tmp, x0
+-    gret
++// NOTE: sxtw/uxtb/uxth live in math.S. The decoder (gen.c) emits an `sf` param
++// word after uxtb/uxth; the math.S versions consume it, these simple copies did
++// not (stream corruption). Removed to fix duplicate-symbol link errors under
++// -force_load and keep math.S canonical.
+ 
+ /*
+  * Bit counting operations
+@@ -159,10 +147,9 @@
+     rev _tmp, _tmp
+     gret
+ 
+-.gadget rev32
+-    rev w0, w0
+-    mov _tmp, x0
+-    gret
++// NOTE: rev32 lives in math.S — the decoder emits a packed rd|rn<<8|sf<<24 word
++// for it; the math.S version consumes that, this copy did not. Removed (see note
++// above on sxtw/uxtb/uxth).
+ 
+ // REV16 Xd, Xn - Reverse bytes in halfwords
+ .gadget rev16_64
