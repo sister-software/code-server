@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #import <Foundation/Foundation.h>
+#import "Remote/Ish/IshBridge.h"
 
 // One-time setup of ios_system's command table / environment. Must run before
 // any ios_system() call or commands won't resolve.

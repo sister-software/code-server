@@ -79,14 +79,8 @@ export class IpadPty implements vscode.Pseudoterminal {
   readonly onDidClose = this.closeEmitter.event
 
   private readonly id = nextId++
-  private buffer = ""
   private cols = 80
   private rows = 24
-  // "prompt": we line-edit locally and ship a whole line via run.
-  // "running": a command owns the tty — forward every keystroke raw to stdin.
-  private mode: "prompt" | "running" = "prompt"
-  private history: string[] = []
-  private historyIndex = 0
 
   open(initialDimensions: vscode.TerminalDimensions | undefined): void {
     if (initialDimensions) {
@@ -94,7 +88,7 @@ export class IpadPty implements vscode.Pseudoterminal {
       this.rows = initialDimensions.rows
     }
     bridge.listen(this.id, (event, data) => this.onNative(event, data))
-    this.writeEmitter.fire("\x1b[1miPad local shell\x1b[0m (ios_system) — type a command\r\n")
+    this.writeEmitter.fire("\x1b[2mStarting Alpine Linux (iSH)…\x1b[0m\r\n")
     void bridge.send("open", this.id, { cols: this.cols, rows: this.rows }).then((r) => {
       if (!r.ok) this.writeEmitter.fire(`\r\n\x1b[31mfailed to start: ${r.error ?? "?"}\x1b[0m\r\n`)
     })
@@ -111,74 +105,18 @@ export class IpadPty implements vscode.Pseudoterminal {
     void bridge.send("resize", this.id, { cols: this.cols, rows: this.rows })
   }
 
+  // Pure passthrough: the Alpine shell owns the tty (prompt, echo, line editing,
+  // Ctrl-C, history) — forward every keystroke raw, render every byte of output.
   handleInput(data: string): void {
-    // A command owns the tty: forward keystrokes raw (the program echoes and
-    // does its own editing). Ctrl-C interrupts the command.
-    if (this.mode === "running") {
-      if (data === "\x03") {
-        void bridge.send("interrupt", this.id)
-      } else {
-        void bridge.send("stdin", this.id, { data: encode(data) })
-      }
-      return
-    }
-
-    // Prompt mode: local line editing.
-    for (const ch of data) {
-      if (ch === "\r") {
-        this.writeEmitter.fire("\r\n")
-        const line = this.buffer
-        this.buffer = ""
-        if (line.trim().length > 0) {
-          this.history.push(line)
-          this.historyIndex = this.history.length
-        }
-        this.mode = "running"
-        void bridge.send("run", this.id, { data: encode(line) })
-      } else if (ch === "\x7f" || ch === "\b") {
-        if (this.buffer.length > 0) {
-          this.buffer = this.buffer.slice(0, -1)
-          this.writeEmitter.fire("\b \b")
-        }
-      } else if (ch === "\x03") {
-        this.writeEmitter.fire("^C\r\n")
-        this.buffer = ""
-        this.writeEmitter.fire("\x1b[32m$\x1b[0m ")
-      } else if (ch === "\x1b") {
-        // Escape sequences (arrows): handle up/down for history below.
-        // Full sequences arrive in one chunk, so inspect `data` directly.
-      } else if (ch >= " ") {
-        this.buffer += ch
-        this.writeEmitter.fire(ch)
-      }
-    }
-
-    // Up/Down history recall (arrows come as ESC[A / ESC[B).
-    if (data === "\x1b[A" || data === "\x1b[B") {
-      if (data === "\x1b[A" && this.historyIndex > 0) this.historyIndex--
-      else if (data === "\x1b[B" && this.historyIndex < this.history.length) this.historyIndex++
-      const recalled = this.history[this.historyIndex] ?? ""
-      // Clear the current line, then write the recalled command.
-      this.writeEmitter.fire("\r\x1b[K\x1b[32m$\x1b[0m " + recalled)
-      this.buffer = recalled
-    }
+    void bridge.send("stdin", this.id, { data: encode(data) })
   }
 
   private onNative(event: string, data: string): void {
-    switch (event) {
-      case "data":
-        // Native sends \n line endings; xterm needs \r\n.
-        this.writeEmitter.fire(decode(data).replace(/(?<!\r)\n/g, "\r\n"))
-        break
-      case "ready":
-        // Command finished (or initial): back to prompt mode.
-        this.mode = "prompt"
-        this.writeEmitter.fire("\x1b[32m$\x1b[0m ")
-        break
-      case "exit":
-        this.closeEmitter.fire(Number(decode(data)) || 0)
-        bridge.unlisten(this.id)
-        break
+    if (event === "data") {
+      this.writeEmitter.fire(decode(data)) // guest emits proper terminal bytes
+    } else if (event === "exit") {
+      this.closeEmitter.fire(Number(decode(data)) || 0)
+      bridge.unlisten(this.id)
     }
   }
 }

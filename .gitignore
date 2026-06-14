@@ -25,3 +25,6 @@ test/test-results
 ios/Vendor/
 ios/_wip-terminal/
 lib/vscode-web/
+ios/Vendor/ish/
+ios/CodeServerClient/Remote/Ish/*.a
+ios/Vendor/ish-rootfs/

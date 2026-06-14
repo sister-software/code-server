@@ -32,6 +32,7 @@ targets:
       - path: CodeServerClient
         excludes:
           - "Resources/**"
+          - "Remote/Ish/*.a"  # iSH static libs are linked, not compiled
       # Everything under Resources/ is bundled verbatim (bridge.js, the local
       # workbench host page + bootstrap), never compiled.
       - path: CodeServerClient/Resources
@@ -45,6 +46,11 @@ targets:
       - path: Vendor/ipad-files-web
         type: folder
         buildPhase: resources
+      # Alpine i386 fakefs for the iSH emulator (copied to a writable dir on
+      # first run). Built by scripts/build-ish.sh.
+      - path: Vendor/ish-rootfs
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: FlyingFox
       - package: SwiftNIO
@@ -55,6 +61,10 @@ targets:
         product: NIOSSH
       - package: ios_system
         product: ios_system
+      # iSH core (GPLv3) is linked via -force_load (below); sqlite3 backs fakefs,
+      # resolv provides the host DNS servers for the guest.
+      - sdk: libsqlite3.tbd
+      - sdk: libresolv.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: software.sister.codeserverclient
@@ -64,3 +74,18 @@ targets:
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         SWIFT_OBJC_BRIDGING_HEADER: CodeServerClient/ios_system-Bridging-Header.h
         SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Vendor/ish"
+          - "$(SRCROOT)/Vendor/ish/build-ios"
+        # iSH archives have circular inter-dependencies; force-load so the
+        # linker resolves across them.
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/libish.a"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/libish_emu.a"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/libfakefs.a"
