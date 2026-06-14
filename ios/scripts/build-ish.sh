@@ -74,17 +74,48 @@ EOF
   meson setup build-ios --cross-file cross-ios.txt --default-library=static >/dev/null
   ninja -C build-ios libish_emu.a libish.a libfakefs.a )
 
-echo "[4/6] Staging libs…"
+echo "[4/7] Staging device libs…"
 mkdir -p CodeServerClient/Remote/Ish
 cp "$ISH"/build-ios/lib{ish_emu,ish,fakefs}.a CodeServerClient/Remote/Ish/
 
-echo "[5/6] Building fakefsify (native)…"
+echo "[5/7] Cross-compiling for the iOS Simulator (arm64) + staging…"
+# Same arm64 code, but a simulator-platform Mach-O (the linker rejects an
+# iphoneos archive when building for the simulator). Lets the app run in the
+# Simulator for side-by-side testing. Apple-Silicon host only.
+SIMSDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+cat > "$ISH/cross-sim.txt" <<EOF
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'ar'
+strip = 'strip'
+[host_machine]
+system = 'darwin'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+[built-in options]
+c_args = ['-target', 'arm64-apple-ios16.4-simulator', '-isysroot', '$SIMSDK']
+c_link_args = ['-target', 'arm64-apple-ios16.4-simulator', '-isysroot', '$SIMSDK']
+cpp_args = ['-target', 'arm64-apple-ios16.4-simulator', '-isysroot', '$SIMSDK']
+[properties]
+needs_exe_wrapper = true
+EOF
+( cd "$ISH"
+  export CC_FOR_BUILD="env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET xcrun clang"
+  rm -rf build-sim
+  meson setup build-sim --cross-file cross-sim.txt --default-library=static >/dev/null
+  ninja -C build-sim libish_emu.a libish.a libfakefs.a )
+mkdir -p CodeServerClient/Remote/Ish/sim
+cp "$ISH"/build-sim/lib{ish_emu,ish,fakefs}.a CodeServerClient/Remote/Ish/sim/
+
+echo "[6/7] Building fakefsify (native)…"
 ( cd "$ISH"
   rm -rf build-native
   meson setup build-native --default-library=static >/dev/null
   ninja -C build-native tools/fakefsify )
 
-echo "[6/6] Building Alpine aarch64 fakefs…"
+echo "[7/7] Building Alpine aarch64 fakefs…"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 curl -fsSL -o "$tmp/alpine.tar.gz" "$ALPINE_URL"
 rm -rf Vendor/ish-rootfs

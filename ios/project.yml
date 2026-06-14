@@ -24,6 +24,24 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: "8NUXP45GK9"
+# A shared, checked-in scheme so the Xcode Run button has a known-good config
+# (Debug build+run) instead of relying on an ephemeral auto-generated one that
+# isn't reproducible after `xcodegen generate` rewrites the project.
+schemes:
+  CodeServerClient:
+    build:
+      targets:
+        CodeServerClient: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
 targets:
   CodeServerClient:
     type: application
@@ -32,7 +50,7 @@ targets:
       - path: CodeServerClient
         excludes:
           - "Resources/**"
-          - "Remote/Ish/*.a"  # iSH static libs are linked, not compiled
+          - "Remote/Ish/**/*.a"  # iSH static libs are linked, not compiled (device + sim/)
       # Everything under Resources/ is bundled verbatim (bridge.js, the local
       # workbench host page + bootstrap), never compiled.
       - path: CodeServerClient/Resources
@@ -51,6 +69,31 @@ targets:
       - path: Vendor/ish-rootfs
         type: folder
         buildPhase: resources
+    # Preflight: the workbench bundle, the builtin extension, the Alpine rootfs,
+    # and the iSH libs are all gitignored (built by scripts/). A clean checkout
+    # has none of them, so pressing Run would build a white-screening app. Fail
+    # the build loudly instead, with the exact commands to fix it.
+    preBuildScripts:
+      - name: "Preflight: vendored artifacts"
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT"
+          miss=0
+          need() { [ -e "$1" ] || { echo "error: missing vendored artifact: $1"; miss=1; }; }
+          need Vendor/vscode-web/package.json
+          need Vendor/ipad-files-web/package.json
+          need Vendor/ish-rootfs/meta.db
+          if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then
+            need CodeServerClient/Remote/Ish/sim/libish.a
+          else
+            need CodeServerClient/Remote/Ish/libish.a
+          fi
+          if [ "$miss" = 1 ]; then
+            echo "error: vendored build inputs are missing (they are gitignored)."
+            echo "error: run: cd ios && ./scripts/build-vscode-web.sh && ./scripts/build-ish.sh"
+            echo "error: (or ./scripts/fetch-vscode-web.sh for the prebuilt workbench), then xcodegen generate."
+            exit 1
+          fi
     dependencies:
       - package: FlyingFox
       - package: SwiftNIO
@@ -91,8 +134,13 @@ targets:
           - "$(SRCROOT)/Vendor/ios-linuxkit"
           - "$(SRCROOT)/Vendor/ios-linuxkit/build-ios"
         # iSH archives have circular inter-dependencies; force-load so the
-        # linker resolves across them.
+        # linker resolves across them. The libs are platform-specific Mach-O
+        # (iphoneos vs iphonesimulator), so pick the matching set per SDK — the
+        # device set in Remote/Ish/, the simulator set in Remote/Ish/sim/. Both
+        # are arm64 (Apple Silicon sim); build-ish.sh produces both.
         OTHER_LDFLAGS:
+          - "$(inherited)"
+        OTHER_LDFLAGS[sdk=iphoneos*]:
           - "$(inherited)"
           - "-force_load"
           - "$(SRCROOT)/CodeServerClient/Remote/Ish/libish.a"
@@ -100,3 +148,11 @@ targets:
           - "$(SRCROOT)/CodeServerClient/Remote/Ish/libish_emu.a"
           - "-force_load"
           - "$(SRCROOT)/CodeServerClient/Remote/Ish/libfakefs.a"
+        OTHER_LDFLAGS[sdk=iphonesimulator*]:
+          - "$(inherited)"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/sim/libish.a"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/sim/libish_emu.a"
+          - "-force_load"
+          - "$(SRCROOT)/CodeServerClient/Remote/Ish/sim/libfakefs.a"

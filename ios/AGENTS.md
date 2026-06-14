@@ -11,12 +11,16 @@ This file is the operational guide for working in `ios/`. For the architecture
 narrative and the full list of WebKit traps, read `ios/README.md` first — don't
 duplicate it here; update it when behavior it describes changes.
 
-## The iterate loop (build → device)
+## The iterate loop (build → device or simulator)
 
-There is no simulator path: the terminal engine ships as **iphoneos arm64**
-static libs (`CodeServerClient/Remote/Ish/*.a`), so a simulator build won't
-link. Always build and run on a real device.
+The terminal engine is a set of platform-specific static libs: device
+(`Remote/Ish/*.a`, iphoneos arm64) and simulator (`Remote/Ish/sim/*.a`,
+iphonesimulator arm64) — `build-ish.sh` builds both, and `project.yml` force-loads
+the matching set per SDK (`OTHER_LDFLAGS[sdk=…]`). So both targets link. The
+guest boots lazily on first terminal open, so the app runs either way even if you
+only built one set.
 
+**Device:**
 ```sh
 cd ios
 xcodegen generate            # regenerate the .xcodeproj after ANY project.yml / file-tree change
@@ -27,13 +31,25 @@ xcrun xcodebuild -project CodeServerClient.xcodeproj -scheme CodeServerClient \
 xcrun devicectl device install app --device "$DEV" build/Build/Products/Debug-iphoneos/Code.app
 ```
 
+**Simulator** (Apple-Silicon Mac — the libs are arm64-only, no x86_64 slice):
+```sh
+SIM="iPad Pro 11-inch (M5)"
+xcrun xcodebuild -project CodeServerClient.xcodeproj -scheme CodeServerClient \
+  -configuration Debug -destination "platform=iOS Simulator,name=$SIM" \
+  -derivedDataPath build-sim build
+xcrun simctl boot "$SIM"; open -a Simulator
+xcrun simctl install "$SIM" build-sim/Build/Products/Debug-iphonesimulator/Code.app
+xcrun simctl launch "$SIM" software.sister.codeserverclient
+```
+
 - **Never `simctl uninstall` / `devicectl uninstall` while iterating** — it wipes
   the WKWebView data store (GitHub login, Settings Sync, workbench state).
   Install-in-place always upgrades cleanly.
-- Launch fails with `error 7 (Locked)` if the device is locked — that's fine,
-  the install still landed; the user launches it.
-- Signing team (`DEVELOPMENT_TEAM`) is baked into `project.yml`.
-- To verify a link/compile without a device, build for
+- On device, launch fails with `error 7 (Locked)` if the device is locked —
+  that's fine, the install still landed; the user launches it.
+- Signing team (`DEVELOPMENT_TEAM`) is baked into `project.yml` (simulator builds
+  don't need it).
+- To verify a link/compile without hardware, build for
   `-destination 'generic/platform=iOS'` (skips signing/install).
 
 ## Project generation
