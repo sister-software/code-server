@@ -47,6 +47,20 @@ export function activate(context: vscode.ExtensionContext): void {
   // The iSH profile is made the default via contributes.configurationDefaults,
   // so + / Terminal ▸ New create it without the profile picker.
 
+  // Host-action commands: the command-palette equivalents of the native wrapper's
+  // two-finger action menu (which is hard to trigger in the Simulator). Each just
+  // signals the native WebViewController via the bridge; fire-and-forget because
+  // reload/hardReload tear down the page before a reply could arrive.
+  function hostAction(action: string): void {
+    bridge.request("host-action", { action }).catch(() => undefined)
+  }
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ipadFiles.reload", () => hostAction("reload")),
+    vscode.commands.registerCommand("ipadFiles.hardReload", () => hostAction("hardReload")),
+    vscode.commands.registerCommand("ipadFiles.servers", () => hostAction("servers")),
+    vscode.commands.registerCommand("ipadFiles.diagnostics", () => hostAction("diagnostics")),
+  )
+
   // A pure web workbench has no terminal backend, so the panel is inert until a
   // terminal exists. Pre-create one (local workbench only) so selecting the
   // Terminal tab shows a ready shell, like desktop. open()/boot is deferred by

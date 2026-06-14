@@ -2,7 +2,7 @@
   "name": "ipad-files",
   "displayName": "iPad Local Files",
   "description": "Browse and edit iPad/iCloud local files in code-server, bridged through the native iOS wrapper.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "publisher": "sister-software",
   "private": true,
   "license": "MIT",
@@ -29,6 +29,26 @@
   ],
   "contributes": {
     "commands": [
+      {
+        "command": "ipadFiles.reload",
+        "title": "Reload Web View",
+        "category": "iPad"
+      },
+      {
+        "command": "ipadFiles.hardReload",
+        "title": "Hard Reload Web View",
+        "category": "iPad"
+      },
+      {
+        "command": "ipadFiles.servers",
+        "title": "Servers…",
+        "category": "iPad"
+      },
+      {
+        "command": "ipadFiles.diagnostics",
+        "title": "Diagnostics",
+        "category": "iPad"
+      },
       {
         "command": "ipadFiles.openFolder",
         "title": "Open Local Folder…",

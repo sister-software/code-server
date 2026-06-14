@@ -150,6 +150,9 @@ final class WebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         LocalFileStore.shared.presenter = self // present the folder picker from here
+        // The ipad-files extension exposes the action-menu items in the command
+        // palette ("iPad: …") by routing host-action ops here.
+        fileBridgeMessages.onHostAction = { [weak self] action in self?.performHostAction(action) }
         load()
 
         // Keyboardless entry to the action menu: two-finger long press.
@@ -260,7 +263,15 @@ final class WebViewController: UIViewController {
         // WebKit handle these keeps copy-with-selection and paste working. (Empty-
         // selection line-copy is a separate WebKit limitation — the copy event
         // doesn't fire without a selection.)
+        //
+        // These are NATIVE shortcuts, so they work on every page — including a
+        // remote code-server, whose own VS Code doesn't have our ipad-files
+        // extension (and thus none of the iPad: … palette commands). Cmd-Opt-M
+        // opens the full action menu, so there's always a keyboard route back to
+        // the Servers list even when the two-finger gesture is impractical (the
+        // Simulator). Hold Cmd to see them (discoverability titles).
         [
+            keyCommand("m", [.command, .alternate], #selector(showActionMenuFromKeyboard), title: "Menu"),
             keyCommand(",", [.command, .alternate], #selector(openSettings), title: "Servers"),
             keyCommand("r", [.command, .alternate], #selector(reloadPage), title: "Reload"),
         ]
@@ -289,13 +300,33 @@ final class WebViewController: UIViewController {
         showActionMenu(at: gesture.location(in: view))
     }
 
+    /// Keyboard route to the action menu (no gesture point): anchor it to the
+    /// view's center. Works on remote pages too, where the palette commands are
+    /// absent.
+    @objc private func showActionMenuFromKeyboard() {
+        showActionMenu(at: CGPoint(x: view.bounds.midX, y: view.bounds.midY))
+    }
+
+    /// The action-menu items, addressable by name. Same set is exposed in the
+    /// command palette via the ipad-files extension (host-action ops) so they're
+    /// reachable without the two-finger gesture (e.g. in the Simulator).
+    func performHostAction(_ name: String) {
+        switch name {
+        case "reload": reloadPage()
+        case "hardReload": hardReload()
+        case "servers": onRequestSettings?()
+        case "diagnostics": showDiagnostics()
+        default: break
+        }
+    }
+
     private func showActionMenu(at point: CGPoint) {
         guard presentedViewController == nil else { return }
         let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in self?.reloadPage() })
-        sheet.addAction(UIAlertAction(title: "Hard Reload", style: .default) { [weak self] _ in self?.hardReload() })
-        sheet.addAction(UIAlertAction(title: "Servers…", style: .default) { [weak self] _ in self?.onRequestSettings?() })
-        sheet.addAction(UIAlertAction(title: "Diagnostics", style: .default) { [weak self] _ in self?.showDiagnostics() })
+        sheet.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in self?.performHostAction("reload") })
+        sheet.addAction(UIAlertAction(title: "Hard Reload", style: .default) { [weak self] _ in self?.performHostAction("hardReload") })
+        sheet.addAction(UIAlertAction(title: "Servers…", style: .default) { [weak self] _ in self?.performHostAction("servers") })
+        sheet.addAction(UIAlertAction(title: "Diagnostics", style: .default) { [weak self] _ in self?.performHostAction("diagnostics") })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         // iPad requires an anchor for action sheets.
         if let popover = sheet.popoverPresentationController {

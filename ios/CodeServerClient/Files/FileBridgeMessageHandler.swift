@@ -19,6 +19,11 @@ final class FileBridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply 
 
     private let store = LocalFileStore.shared
 
+    /// Invoked (on the main thread) for `host-action` ops — the extension's
+    /// command-palette equivalents of the native action menu (reload, hard
+    /// reload, servers, diagnostics). Set by the owning WebViewController.
+    var onHostAction: ((String) -> Void)?
+
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage,
@@ -41,6 +46,13 @@ final class FileBridgeMessageHandler: NSObject, WKScriptMessageHandlerWithReply 
         case "log":
             fileLog.log("EXT: \(params["msg"] ?? "", privacy: .public)")
             reply(["ok": true])
+            return
+        case "host-action":
+            let action = params["action"] ?? ""
+            // Reply first: reload/hardReload tear down the page, so the action
+            // must run after the BroadcastChannel reply is on its way.
+            reply(["ok": true])
+            DispatchQueue.main.async { self.onHostAction?(action) }
             return
         case "pick-folder":
             store.pickFolder { result in

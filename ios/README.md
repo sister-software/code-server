@@ -108,6 +108,9 @@ resumes the session.
 - **Cmd + Opt + R** — reload the page.
 - **Two-finger long press** — Reload / Hard Reload / Servers / **Diagnostics**
   (async page probe → alert; the only "console" available untethered).
+- **Command palette** (local workbench) — the same four actions as
+  `iPad: Reload Web View / Hard Reload Web View / Servers… / Diagnostics`, for
+  when the two-finger gesture is awkward (e.g. the Simulator).
 
 ## WebKit traps (hard-won; read before touching)
 
