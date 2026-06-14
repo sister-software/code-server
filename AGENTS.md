@@ -13,6 +13,18 @@ The two halves live in very different places:
 
 If functionality does **not** depend on Code internals, it belongs in `src/`, not in a patch.
 
+## The iOS app (`ios/`)
+
+`ios/` holds a separate subproject: a native iPad app (product name **Code**)
+that hosts a serverless VS Code web workbench locally, edits local files, runs an
+offline Linux terminal, and does native SSH remoting. It is developed on the
+`feat/ios-client` branch and is **not** part of the published code-server
+package, but it reuses this repo's `lib/vscode` submodule + `quilt` infra to
+build its workbench (with its own `patches/ios-*.diff`, applied on vanilla Code —
+not in `patches/series`). If you're working under `ios/`, read **`ios/AGENTS.md`**
+(operational guide) and `ios/README.md` (architecture); the rest of this file is
+about the server.
+
 ## The patch system (most important workflow concept)
 
 Modifications to upstream Code are managed with [`quilt`](https://savannah.nongnu.org/projects/quilt/) as a stack of patches in `patches/`, ordered by `patches/series`. The submodule is checked out at an upstream release branch; patches are applied on top.
