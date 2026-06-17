@@ -1,0 +1,118 @@
+diff --git a/kernel/getset.c b/kernel/getset.c
+index 8edf84f..ef27bbe 100644
+--- a/kernel/getset.c
++++ b/kernel/getset.c
+@@ -40,29 +40,18 @@ dword_t sys_geteuid() {
+     return current->euid & 0xffff;
+ }
+ 
++// iSH is a single-user emulator with no real uid-based security (passwordless su,
++// faked user namespaces for containers), so set*id always succeed — rejecting
++// them broke rootless podman ("cannot setresgid: Operation not permitted") where
++// crun drops to a mapped uid/gid.
+ int_t sys_setuid(uid_t_ uid) {
+     STRACE("setuid(%d)", uid);
+-    if (superuser()) {
+-        current->uid = current->suid = uid;
+-    } else {
+-        if (uid != current->uid && uid != current->suid)
+-            return _EPERM;
+-    }
+-    current->euid = uid;
++    current->uid = current->suid = current->euid = uid;
+     return 0;
+ }
+ 
+ dword_t sys_setresuid(uid_t_ ruid, uid_t_ euid, uid_t_ suid) {
+     STRACE("setresuid(%d, %d, %d)", ruid, euid, suid);
+-    if (!superuser()) {
+-        if (ruid != (uid_t) -1 && ruid != current->uid && ruid != current->euid && ruid != current->suid)
+-            return _EPERM;
+-        if (euid != (uid_t) -1 && euid != current->uid && euid != current->euid && euid != current->suid)
+-            return _EPERM;
+-        if (suid != (uid_t) -1 && suid != current->uid && suid != current->euid && suid != current->suid)
+-            return _EPERM;
+-    }
+-
+     if (ruid != (uid_t) -1)
+         current->uid = ruid;
+     if (euid != (uid_t) -1)
+@@ -107,27 +96,12 @@ dword_t sys_getegid() {
+ 
+ int_t sys_setgid(uid_t_ gid) {
+     STRACE("setgid(%d)", gid);
+-    if (superuser()) {
+-        current->gid = current->sgid = gid;
+-    } else {
+-        if (gid != current->gid && gid != current->sgid)
+-            return _EPERM;
+-    }
+-    current->egid = gid;
++    current->gid = current->sgid = current->egid = gid;
+     return 0;
+ }
+ 
+ dword_t sys_setresgid(uid_t_ rgid, uid_t_ egid, uid_t_ sgid) {
+     STRACE("setresgid(%d, %d, %d)", rgid, egid, sgid);
+-    if (!superuser()) {
+-        if (rgid != (uid_t) -1 && rgid != current->gid && rgid != current->egid && rgid != current->sgid)
+-            return _EPERM;
+-        if (egid != (uid_t) -1 && egid != current->gid && egid != current->egid && egid != current->sgid)
+-            return _EPERM;
+-        if (sgid != (uid_t) -1 && sgid != current->gid && sgid != current->egid && sgid != current->sgid)
+-            return _EPERM;
+-    }
+-
+     if (rgid != (uid_t) -1)
+         current->gid = rgid;
+     if (egid != (uid_t) -1)
+@@ -177,11 +151,48 @@ int_t sys_setgroups(dword_t size, addr_t list) {
+     return 0;
+ }
+ 
+-// this does not really work
++// Linux capability ABI (uapi/linux/capability.h).
++#define _LINUX_CAPABILITY_VERSION_1 0x19980330
++#define _LINUX_CAPABILITY_VERSION_2 0x20071026
++#define _LINUX_CAPABILITY_VERSION_3 0x20080522
++struct cap_user_header { dword_t version; int_t pid; };
++struct cap_user_data { dword_t effective, permitted, inheritable; };
++
++// We don't enforce capabilities, but container runtimes (crun/podman) probe the
++// kernel's capability version with capget and refuse to start ("unknown
++// capability version") if it isn't reported back. Report v3 and full
++// permitted/effective caps. (The old stub returned 0 and wrote nothing.)
+ int_t sys_capget(addr_t header_addr, addr_t data_addr) {
+     STRACE("capget(%#x, %#x)", header_addr, data_addr);
++    struct cap_user_header header;
++    if (user_get(header_addr, header))
++        return _EFAULT;
++    unsigned datums;
++    switch (header.version) {
++        case _LINUX_CAPABILITY_VERSION_1: datums = 1; break;
++        case _LINUX_CAPABILITY_VERSION_2:
++        case _LINUX_CAPABILITY_VERSION_3: datums = 2; break;
++        default:
++            // Probe / unsupported version: report our preferred version and fail
++            // so the caller retries with it (matches Linux capget semantics).
++            header.version = _LINUX_CAPABILITY_VERSION_3;
++            if (user_put(header_addr, header))
++                return _EFAULT;
++            return _EINVAL;
++    }
++    if (data_addr != 0) {
++        struct cap_user_data data[2] = {};
++        for (unsigned i = 0; i < datums; i++) {
++            data[i].effective = 0xffffffff;
++            data[i].permitted = 0xffffffff;
++            data[i].inheritable = 0;
++        }
++        if (user_write(data_addr, data, datums * sizeof(data[0])))
++            return _EFAULT;
++    }
+     return 0;
+ }
++// Capabilities aren't enforced, so accept any set (no-op success).
+ int_t sys_capset(addr_t header_addr, addr_t data_addr) {
+     STRACE("capset(%#x, %#x)", header_addr, data_addr);
+     return 0;

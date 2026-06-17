@@ -1,0 +1,23 @@
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f8b0287..083adf4 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -159,10 +159,16 @@ fail_free_mem:
+     return err;
+ }
+ 
++// Namespace flags: we don't implement real namespace isolation, but container
++// runtimes (podman/crun) clone into new namespaces and fail with EINVAL if the
++// flags are rejected. Accept and ignore them so they proceed (no isolation) —
++// the child is an ordinary process/thread that shares the global namespaces.
++#define NS_FLAGS (CLONE_NEWNS_|CLONE_NEWCGROUP_|CLONE_NEWUTS_|CLONE_NEWIPC_|CLONE_NEWUSER_|CLONE_NEWPID_|CLONE_NEWNET_)
++
+ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid) {
+     STRACE("clone(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)", flags, stack, ptid, tls, ctid);
+-    if (flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS) {
+-        FIXME("unimplemented clone flags 0x%x", flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS);
++    if (flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS & ~NS_FLAGS) {
++        FIXME("unimplemented clone flags 0x%x", flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS & ~NS_FLAGS);
+         return _EINVAL;
+     }
+     if (flags & CLONE_SIGHAND_ && !(flags & CLONE_VM_))
