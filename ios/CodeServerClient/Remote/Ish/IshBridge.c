@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <resolv.h>
 #include <netdb.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/ucontext.h>
 
 // iSH core headers (GPLv3). Header search path includes the iSH source root +
 // build-ios. Ported/trimmed from app/AppDelegate.m (boot), app/Terminal.m (tty
@@ -124,16 +127,124 @@ static void configure_dns(void) {
     }
 }
 
+// --- Asbestos JIT crash handler ---------------------------------------------
+//
+// The arm64 Asbestos engine deliberately lets the JIT'd code take a host SIGSEGV
+// on a guest page fault, then recovers in a signal handler (reconstructs the
+// guest fault address, rewinds to the block start, and redirects to
+// jit_crash_trampoline which returns INT_JIT_CRASH). The standalone `ish` binary
+// installs this in main(); our app embeds the engine as a library and must
+// install the same handler or guest faults crash the whole app (e.g. `ls`
+// page-faults where `uname` doesn't). Ported from ish-arm64 main.c.
+//
+// Unlike main.c we only hook SIGSEGV/SIGBUS and CHAIN to the previous handler
+// for non-JIT faults, so WebKit/Swift/OS crash reporting is left intact.
+#if defined(__aarch64__) && defined(GUEST_ARM64)
+#include "cpu-offsets.h"  // CPU_pc, CPU_segfault_addr, CPU_segfault_was_write, LOCAL_jit_exit_sp
+extern __thread volatile sig_atomic_t in_jit;
+extern __thread volatile uint64_t jit_saved_pc;
+extern __thread volatile uint64_t jit_last_host_fault;
+extern __thread volatile uint64_t jit_last_x7;
+extern __thread volatile uint64_t jit_last_x10;
+extern __thread volatile int jit_crash_count;
+extern void jit_crash_trampoline(void);
+
+static struct sigaction g_prev_segv, g_prev_bus;
+
+static void ish_crash_handler(int sig, siginfo_t *info, void *ctx) {
+    if ((sig == SIGSEGV || sig == SIGBUS) && in_jit) {
+        ucontext_t *uc = (ucontext_t *)ctx;
+        uint64_t cpu_ptr = uc->uc_mcontext->__ss.__x[1];   // _cpu is in x1
+        uint64_t x7 = uc->uc_mcontext->__ss.__x[7];
+        uint64_t x10 = uc->uc_mcontext->__ss.__x[10];
+        uint64_t guest_addr = (x7 - x10) & 0xffffffffffffULL;
+        jit_last_host_fault = (uint64_t)info->si_addr;
+        jit_last_x7 = x7;
+        jit_last_x10 = x10;
+        jit_crash_count++;
+        uint64_t esr = uc->uc_mcontext->__es.__esr;
+        int was_write = (esr & 0x40) != 0;
+        *(uint64_t *)(cpu_ptr + CPU_segfault_addr) = guest_addr;
+        *(int *)(cpu_ptr + CPU_segfault_was_write) = was_write;
+        *(uint64_t *)(cpu_ptr + CPU_pc) = (uint64_t)jit_saved_pc;
+        uc->uc_mcontext->__ss.__sp = *(uint64_t *)(cpu_ptr + LOCAL_jit_exit_sp);
+        uc->uc_mcontext->__ss.__pc = (uint64_t)jit_crash_trampoline;
+        sigset_t unblock;
+        sigemptyset(&unblock);
+        sigaddset(&unblock, sig);
+        sigprocmask(SIG_UNBLOCK, &unblock, NULL);
+        return;  // resumes at jit_crash_trampoline
+    }
+    // Not a JIT fault — hand off to whatever was installed before us.
+    struct sigaction *prev = (sig == SIGBUS) ? &g_prev_bus : &g_prev_segv;
+    if (prev->sa_flags & SA_SIGINFO) {
+        if (prev->sa_sigaction) { prev->sa_sigaction(sig, info, ctx); return; }
+    } else if (prev->sa_handler == SIG_IGN) {
+        return;
+    } else if (prev->sa_handler && prev->sa_handler != SIG_DFL) {
+        prev->sa_handler(sig);
+        return;
+    }
+    signal(sig, SIG_DFL);  // default disposition → crash as usual
+    raise(sig);
+}
+
+static void install_crash_handler(void) {
+    static int installed = 0;
+    if (installed) return;
+    installed = 1;
+    static char altstack[SIGSTKSZ];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof(altstack) };
+    sigaltstack(&ss, NULL);
+    struct sigaction sa = {0};
+    sa.sa_sigaction = ish_crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &g_prev_segv);
+    sigaction(SIGBUS, &sa, &g_prev_bus);
+}
+#else
+static void install_crash_handler(void) {}
+#endif
+
 // --- boot + spawn ------------------------------------------------------------
 
-static const char k_argv[] = "/bin/sh\0-l\0";
+// Terminals run as the `operator` user: `su -l operator` is a login shell, so it
+// sets HOME=/home/operator, cwd, and runs operator's login shell (zsh) which
+// sources ~/.zshrc (PATH etc.). We're pid 1 / an init child (root), so no
+// password is needed. Falls back to a root /bin/sh if su/operator is missing
+// (e.g. an old rootfs), so a terminal always comes up.
+static const char k_su_argv[] = "/bin/su\0-l\0operator\0";
+static const char k_zsh_argv[] = "/bin/zsh\0-l\0";
+static const char k_sh_argv[] = "/bin/sh\0-l\0";
 static const char k_envp[] =
-    "TERM=xterm-256color\0HOME=/root\0PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0";
+    "TERM=xterm-256color\0HOME=/home/operator\0PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0";
+
+// do_execve returns 0 on success here (it stages the guest image; it does not
+// replace this thread), so the fallback runs only if the exec couldn't happen.
+//
+// Boot (pid 1, root): `su -l operator` drops to operator with a login shell.
+// Spawned ptys are init children that already inherit operator's creds (pid 1
+// became operator via the first su), so they exec zsh DIRECTLY — running su again
+// as non-root would fail ("su: must be suid to work properly"). Both fall back to
+// /bin/sh. .zshrc cd's login shells to $HOME (init children don't inherit cwd).
+static int exec_boot_shell(void) {
+    int err = do_execve("/bin/su", 3, k_su_argv, k_envp);
+    if (err < 0) err = do_execve("/bin/sh", 2, k_sh_argv, k_envp);
+    return err;
+}
+
+static int exec_pty_shell(void) {
+    int err = do_execve("/bin/zsh", 2, k_zsh_argv, k_envp);
+    if (err < 0) err = do_execve("/bin/sh", 2, k_sh_argv, k_envp);
+    return err;
+}
 
 static int boot_kernel(const char *fakefs_dir, int first_id, int cols, int rows) {
     char source[4096];
     snprintf(source, sizeof(source), "%s/data", fakefs_dir);
 
+    install_crash_handler();  // recover guest page faults (else `ls` etc. crash)
     int err = mount_root(&fakefs, source);
     if (err < 0) return err;
     err = become_first_process();
@@ -151,7 +262,7 @@ static int boot_kernel(const char *fakefs_dir, int first_id, int cols, int rows)
     struct tty *tty = term_tty(first_id);
     if (tty) tty_set_winsize(tty, (struct winsize_) { .row = (word_t) rows, .col = (word_t) cols });
 
-    err = do_execve("/bin/sh", 2, k_argv, k_envp);
+    err = exec_boot_shell();
     if (err < 0) return err;
     task_start(current);
     return 0;
@@ -171,7 +282,7 @@ static int spawn_pty(int term_id, int cols, int rows) {
     tty_release(tty);
     if (err < 0) return err;
 
-    err = do_execve("/bin/sh", 2, k_argv, k_envp);
+    err = exec_pty_shell();
     if (err < 0) return err;
     task_start(current);
     return 0;

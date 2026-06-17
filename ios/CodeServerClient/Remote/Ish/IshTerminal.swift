@@ -62,12 +62,18 @@ final class IshTerminal {
         let fm = FileManager.default
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         // Versioned: bumping forces a fresh copy when the bundled rootfs changes
-        // (e.g. i386 → arm64, or rcarmo → OpenMinis), instead of reusing a stale
-        // writable copy.
-        let dest = support.appendingPathComponent("ish-rootfs-openminis", isDirectory: true)
+        // (e.g. i386 → arm64, rcarmo → OpenMinis, or new baked defaults), instead
+        // of reusing a stale writable copy.
+        let version = "ish-rootfs-operator4"
+        let dest = support.appendingPathComponent(version, isDirectory: true)
         if !fm.fileExists(atPath: dest.appendingPathComponent("meta.db").path) {
             try? fm.createDirectory(at: support, withIntermediateDirectories: true)
-            try? fm.removeItem(at: dest)
+            // Drop any prior versioned copies so old rootfs revisions don't
+            // accumulate (each is tens of MB) when the version is bumped.
+            for name in (try? fm.contentsOfDirectory(atPath: support.path)) ?? []
+            where name.hasPrefix("ish-rootfs-") {
+                try? fm.removeItem(at: support.appendingPathComponent(name))
+            }
             if let src = Bundle.main.resourceURL?.appendingPathComponent("ish-rootfs") {
                 try? fm.copyItem(at: src, to: dest)
             }

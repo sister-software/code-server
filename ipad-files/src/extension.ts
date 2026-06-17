@@ -24,9 +24,10 @@ export function activate(context: vscode.ExtensionContext): void {
   )
   context.subscriptions.push(
     vscode.commands.registerCommand("ipadFiles.mountAlpine", () => {
-      const uri = vscode.Uri.parse(`${ISH_SCHEME}:/root`)
+      // Mount operator's home (the terminal opens there too), not root's.
+      const uri = vscode.Uri.parse(`${ISH_SCHEME}:/home/operator`)
       const index = vscode.workspace.workspaceFolders?.length ?? 0
-      vscode.workspace.updateWorkspaceFolders(index, 0, { uri, name: "Alpine (iSH)" })
+      vscode.workspace.updateWorkspaceFolders(index, 0, { uri, name: "Alpine (operator)" })
     }),
   )
 
