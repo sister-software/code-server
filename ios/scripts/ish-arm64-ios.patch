@@ -1,0 +1,954 @@
+diff --git a/asbestos/guest-arm64/gadgets-aarch64/bits.S b/asbestos/guest-arm64/gadgets-aarch64/bits.S
+index fdc8f22..ecc5147 100644
+--- a/asbestos/guest-arm64/gadgets-aarch64/bits.S
++++ b/asbestos/guest-arm64/gadgets-aarch64/bits.S
+@@ -103,22 +103,10 @@
+     mov _tmp, x0
+     gret
+ 
+-// SXTW Xd, Wn - Sign extend word
+-.gadget sxtw
+-    sxtw _tmp, w0
+-    gret
+-
+-// UXTB Xd, Wn - Zero extend byte
+-.gadget uxtb
+-    uxtb w0, w0
+-    mov _tmp, x0
+-    gret
+-
+-// UXTH Xd, Wn - Zero extend halfword
+-.gadget uxth
+-    uxth w0, w0
+-    mov _tmp, x0
+-    gret
++// NOTE: sxtw/uxtb/uxth live in math.S. The decoder (gen.c) emits an `sf` param
++// word after uxtb/uxth; the math.S versions consume it, these simple copies did
++// not (stream corruption). Removed to fix duplicate-symbol link errors under
++// -force_load and keep math.S canonical.
+ 
+ /*
+  * Bit counting operations
+@@ -159,10 +147,9 @@
+     rev _tmp, _tmp
+     gret
+ 
+-.gadget rev32
+-    rev w0, w0
+-    mov _tmp, x0
+-    gret
++// NOTE: rev32 lives in math.S — the decoder emits a packed rd|rn<<8|sf<<24 word
++// for it; the math.S version consumes that, this copy did not. Removed (see note
++// above on sxtw/uxtb/uxth).
+ 
+ // REV16 Xd, Xn - Reverse bytes in halfwords
+ .gadget rev16_64
+diff --git a/fs/fd.c b/fs/fd.c
+index 87849ee..4e33ab6 100644
+--- a/fs/fd.c
++++ b/fs/fd.c
+@@ -240,6 +240,8 @@ void fdtable_do_cloexec(struct fdtable *table) {
+ #define F_SETLKW64_ 14
+ 
+ #define F_DUPFD_CLOEXEC_ 1030
++#define F_ADD_SEALS_ 1033
++#define F_GET_SEALS_ 1034
+ 
+ dword_t sys_dup(fd_t f) {
+     STRACE("dup(%d)", f);
+@@ -375,6 +377,29 @@ dword_t sys_fcntl(fd_t f, dword_t cmd, addr_t arg) {
+                 return _EFAULT;
+             return fcntl_setlk(fd, &flock, cmd == F_SETLKW_);
+ 
++        // memfd seals (F_ADD_SEALS=1033, F_GET_SEALS=1034). iSH doesn't enforce
++        // seals, but crun seals its memfd copy of itself before fexecve and
++        // treats a failure as fatal ("Failed to re-execute libcrun via memory
++        // file descriptor"). Accept the seal (no-op) and report the requested
++        // seals back so crun proceeds to fexecve.
++        case F_ADD_SEALS_:
++            STRACE("fcntl(%d, F_ADD_SEALS, 0x%x)", f, arg);
++            return 0;
++        case F_GET_SEALS_:
++            // Report every fd as sealed with EXACTLY F_SEAL_SEAL|SHRINK|GROW|WRITE
++            // (0xf). crun's CVE-2019-5736 mitigation opens /proc/self/exe and, in
++            // is_self_cloned(), treats the binary as an already-sealed memfd only
++            // if `fcntl(F_GET_SEALS) == CRUN_MEMFD_SEALS` (that exact 0xf). When it
++            // isn't, crun clones itself into a sealed memfd and re-execs — but iSH
++            // can't make /proc/self/exe resolve back to that anonymous memfd, so
++            // the re-exec'd crun never sees the seal and loops forever. Returning
++            // exactly 0xf makes the first crun believe it's already the sealed
++            // clone and skip the whole re-exec. Safe here: single-user offline
++            // sandbox, no container-escape surface. (0x3f — extra FUTURE_WRITE/EXEC
++            // bits — fails crun's exact-equality check, so it must be 0xf.)
++            STRACE("fcntl(%d, F_GET_SEALS)", f);
++            return 0xf;
++
+         default:
+             STRACE("fcntl(%d, %d)", f, cmd);
+             return _EINVAL;
+diff --git a/fs/mount.c b/fs/mount.c
+index 68435ed..dc9c8ad 100644
+--- a/fs/mount.c
++++ b/fs/mount.c
+@@ -1,10 +1,15 @@
+ #include <string.h>
+ #include <sys/stat.h>
++#include <fcntl.h>
+ #include "kernel/calls.h"
+ #include "kernel/fs.h"
+ #include "fs/path.h"
+ #include "fs/real.h"
+ 
++// Defined in fs/fake.c — register/remove a bind mount of a guest path.
++int fakefs_bind_mount(const char *linux_path, const char *host_path, bool read_only);
++int fakefs_bind_unmount(const char *linux_path);
++
+ #define MAX_FILESYSTEMS 10
+ static const struct fs_ops *filesystems[MAX_FILESYSTEMS] = {
+     &realfs,
+@@ -157,8 +162,16 @@ int do_umount(const char *point) {
+             break;
+         }
+     }
+-    if (!found)
++    if (!found) {
++        // Not a real mount — maybe a fakefs bind (e.g. MS_BIND above). crun's
++        // self-clone binds /proc/self/exe → tmpfile, opens it, then unmounts it
++        // before fexecve'ing the now-anonymous fd; the unmount must succeed or
++        // crun abandons the bind and falls back to the memfd re-exec loop.
++        int err = fakefs_bind_unmount(point);
++        if (err == 0)
++            return 0;
+         return _EINVAL;
++    }
+     return mount_remove(mount);
+ }
+ 
+@@ -192,8 +205,49 @@ dword_t sys_mount(addr_t source_addr, addr_t point_addr, addr_t type_addr, dword
+         return _EFAULT;
+     STRACE("mount(\"%s\", \"%s\", \"%s\", %#x, \"%s\")", source, point_raw, type, flags, data_addr != 0 ? data : NULL);
+ 
+-    if (flags & ~MS_SUPPORTED) {
+-        FIXME("missing mount flags %#x", flags & ~MS_SUPPORTED);
++    // A mount() that sets a propagation type (private/shared/slave/unbindable,
++    // optionally MS_REC) changes propagation on an existing mount — source, type
++    // and data are ignored. iSH has one global mount table with no propagation,
++    // so accept it as a no-op. container tooling relies on this: after
++    // unshare(CLONE_NEWNS), containers/storage runs
++    // mount("", "/", "", MS_REC|MS_PRIVATE, "") before extracting an image layer.
++    if (flags & (MS_PRIVATE_ | MS_SHARED_ | MS_SLAVE_ | MS_UNBINDABLE_))
++        return 0;
++
++    // A remount (MS_REMOUNT) only changes flags on an existing mount; source and
++    // type are ignored. crun remounts its bind-mounted self read-only
++    // (mount(NULL, target, NULL, MS_BIND|MS_REMOUNT|MS_RDONLY)) right after the
++    // bind below — accept it as a no-op so crun keeps the bind instead of falling
++    // back to the memfd re-exec loop. (Checked before MS_BIND: a remount carries
++    // MS_BIND too but has no real source to resolve.)
++    if (flags & MS_REMOUNT_)
++        return 0;
++
++    // Bind mount: make `point` resolve to the same file/dir as `source`. iSH has
++    // no kernel bind machinery, but container runtimes lean on it: crun's
++    // CVE-2019-5736 self-clone does mount("/proc/self/exe", tmpfile, MS_BIND)
++    // then execs the clone (without this it re-execs in a loop and `podman run`
++    // fails). We resolve the source to its host backing path and register a
++    // fakefs bind at the target.
++    if (flags & MS_BIND_) {
++        struct fd *src = generic_open(source, O_RDONLY_, 0);
++        if (IS_ERR(src))
++            return PTR_ERR(src);
++        char host[MAX_PATH];
++        bool ok = src->real_fd >= 0 && fcntl(src->real_fd, F_GETPATH, host) == 0;
++        fd_close(src);
++        if (!ok)
++            return _EINVAL;
++        // crun pre-creates the target as an empty file; drop it so the bind's
++        // symlink can take its place (ignored if the target is a dir / absent).
++        generic_unlinkat(AT_PWD, point_raw);
++        return fakefs_bind_mount(point_raw, host, (flags & MS_READONLY_) != 0);
++    }
++
++    // Ignore MS_REC / MS_SILENT (recursion + log-suppression hints we can't act
++    // on) when validating the remaining flags.
++    if (flags & ~MS_SUPPORTED & ~MS_REC_) {
++        FIXME("missing mount flags %#x", flags & ~MS_SUPPORTED & ~MS_REC_);
+         return _EINVAL;
+     }
+ 
+diff --git a/fs/proc/pid.c b/fs/proc/pid.c
+index 05861c7..5b6b475 100644
+--- a/fs/proc/pid.c
++++ b/fs/proc/pid.c
+@@ -340,17 +340,128 @@ static int proc_pid_cwd_readlink(struct proc_entry *entry, char *buf) {
+ }
+ 
+ 
++// /proc/<pid>/status — human-readable process info. Container runtimes
++// (crun/podman) read /proc/self/status for uid/gid maps and capabilities and
++// abort ("open /proc/self/status: no such file or directory") without it.
++static int proc_pid_status_show(struct proc_entry *entry, struct proc_data *buf) {
++    struct task *task = proc_get_task(entry);
++    if (task == NULL)
++        return _ESRCH;
++    lock(&task->general_lock);
++    lock(&task->group->lock);
++
++    proc_printf(buf, "Name:\t%.16s\n", task->comm);
++    proc_printf(buf, "State:\t%s\n",
++            task->zombie ? "Z (zombie)" :
++            task->group->stopped ? "T (stopped)" : "R (running)");
++    proc_printf(buf, "Tgid:\t%d\n", task->tgid);
++    proc_printf(buf, "Pid:\t%d\n", task->pid);
++    proc_printf(buf, "PPid:\t%d\n", task->parent ? task->parent->pid : 0);
++    proc_printf(buf, "TracerPid:\t0\n");
++    proc_printf(buf, "Uid:\t%d\t%d\t%d\t%d\n", task->uid, task->euid, task->suid, task->euid);
++    proc_printf(buf, "Gid:\t%d\t%d\t%d\t%d\n", task->gid, task->egid, task->sgid, task->egid);
++    proc_printf(buf, "FDSize:\t256\n");
++    proc_printf(buf, "Groups:");
++    for (unsigned i = 0; i < task->ngroups; i++)
++        proc_printf(buf, " %d", task->groups[i]);
++    proc_printf(buf, "\n");
++    proc_printf(buf, "Threads:\t%d\n", list_size(&task->group->threads));
++    // Capabilities aren't enforced; report the full set (matches sys_capget).
++    proc_printf(buf, "CapInh:\t0000000000000000\n");
++    proc_printf(buf, "CapPrm:\t000001ffffffffff\n");
++    proc_printf(buf, "CapEff:\t000001ffffffffff\n");
++    proc_printf(buf, "CapBnd:\t000001ffffffffff\n");
++    proc_printf(buf, "CapAmb:\t0000000000000000\n");
++    proc_printf(buf, "NoNewPrivs:\t0\n");
++    proc_printf(buf, "Seccomp:\t0\n");
++
++    unlock(&task->group->lock);
++    unlock(&task->general_lock);
++    proc_put_task(task);
++    return 0;
++}
++
++// User-namespace uid/gid maps + setgroups. We don't implement user namespaces,
++// but rootless container runtimes (podman/crun) write these during setup and
++// abort without them ("cannot write setgroups file: ... no such file"). Accept
++// writes (no-op) and read back a permissive identity map / "allow".
++static int proc_pid_idmap_show(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
++    proc_printf(buf, "         0          0 4294967295\n");
++    return 0;
++}
++static ssize_t proc_pid_idmap_pwrite(struct proc_entry *UNUSED(entry), struct proc_data *buf, off_t UNUSED(offset)) {
++    return buf->size; // accept and discard the mapping
++}
++static int proc_pid_setgroups_show(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
++    proc_printf(buf, "allow\n");
++    return 0;
++}
++static ssize_t proc_pid_setgroups_pwrite(struct proc_entry *UNUSED(entry), struct proc_data *buf, off_t UNUSED(offset)) {
++    return buf->size; // accept "deny"/"allow" no-op
++}
++
++// /proc/<pid>/mounts + /proc/<pid>/mountinfo, generated from the global mount
++// table (iSH has no per-process mount namespaces). podman/runc require these:
++// containers/storage parses /proc/self/mountinfo to decide whether a path (e.g.
++// the container's userdata/shm) is already mounted, and aborts with "open
++// /proc/self/mountinfo: no such file or directory" when it's missing.
++static void proc_mount_point(const struct mount *mount, const char **point) {
++    *point = (mount->point == NULL || mount->point[0] == '\0') ? "/" : mount->point;
++}
++// /proc/<pid>/cgroup. iSH has no cgroups; report the unified-hierarchy root so
++// crun/podman stop erroring ("open /proc/self/cgroup: no such file or
++// directory") when probing cgroup membership.
++static int proc_pid_cgroup_show(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
++    proc_printf(buf, "0::/\n");
++    return 0;
++}
++static int proc_pid_mounts_show(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
++    struct mount *mount;
++    lock(&mounts_lock);
++    list_for_each_entry(&mounts, mount, mounts) {
++        const char *point; proc_mount_point(mount, &point);
++        const char *src = (mount->source && mount->source[0]) ? mount->source : mount->fs->name;
++        const char *opts = (mount->flags & MS_READONLY_) ? "ro,relatime" : "rw,relatime";
++        proc_printf(buf, "%s %s %s %s 0 0\n", src, point, mount->fs->name, opts);
++    }
++    unlock(&mounts_lock);
++    return 0;
++}
++static int proc_pid_mountinfo_show(struct proc_entry *UNUSED(entry), struct proc_data *buf) {
++    struct mount *mount;
++    int id = 1;
++    lock(&mounts_lock);
++    list_for_each_entry(&mounts, mount, mounts) {
++        const char *point; proc_mount_point(mount, &point);
++        const char *src = (mount->source && mount->source[0]) ? mount->source : mount->fs->name;
++        const char *opts = (mount->flags & MS_READONLY_) ? "ro,relatime" : "rw,relatime";
++        // id parent major:minor root mountpoint opts - fstype source superopts
++        proc_printf(buf, "%d %d 0:%d / %s %s - %s %s %s\n",
++                id + 10, id == 1 ? 1 : 11, id, point, opts, mount->fs->name, src, opts);
++        id++;
++    }
++    unlock(&mounts_lock);
++    return 0;
++}
++
+ struct proc_children proc_pid_children = PROC_CHILDREN({
+     {"auxv", .show = proc_pid_auxv_show},
++    {"cgroup", .show = proc_pid_cgroup_show},
+     {"cmdline", .show = proc_pid_cmdline_show},
+     {"cwd", S_IFLNK, .readlink = proc_pid_cwd_readlink},
+     {"exe", S_IFLNK, .readlink = proc_pid_exe_readlink},
+     {"fd", S_IFDIR, .readdir = proc_pid_fd_readdir},
++    {"gid_map", S_IFREG | 0644, .show = proc_pid_idmap_show, .pwrite = proc_pid_idmap_pwrite},
+     {"maps", .show = proc_pid_maps_show},
+     {"mem", .pread = proc_pid_mem_pread, .pwrite = proc_pid_mem_pwrite},
++    {"mountinfo", .show = proc_pid_mountinfo_show},
++    {"mounts", .show = proc_pid_mounts_show},
++    {"setgroups", S_IFREG | 0644, .show = proc_pid_setgroups_show, .pwrite = proc_pid_setgroups_pwrite},
+     {"stat", .show = proc_pid_stat_show},
+     {"statm", .show = proc_pid_statm_show},
++    {"status", .show = proc_pid_status_show},
+     {"task", S_IFDIR, .readdir = proc_pid_task_readdir},
++    {"uid_map", S_IFREG | 0644, .show = proc_pid_idmap_show, .pwrite = proc_pid_idmap_pwrite},
+ });
+ 
+ struct proc_dir_entry proc_pid = {NULL, S_IFDIR,
+diff --git a/fs/tmp.c b/fs/tmp.c
+index 462ace4..7de4fa1 100644
+--- a/fs/tmp.c
++++ b/fs/tmp.c
+@@ -241,10 +241,12 @@ static void tmpfs_unmount_tree(struct tmp_inode *tree) {
+ #endif
+ 
+ static int tmpfs_umount(struct mount *UNUSED(mount)) {
+-    // big fat fuckin TODO
+-    // struct tmp_inode *root = mount->data;
+-    // tmpfs_unmount_tree(root);
+-    TODO("tmpfs umount");
++    // The in-memory tmpfs tree isn't freed here (minor leak per umount), but we
++    // must NOT die: container runtimes (crun/podman) mount and then unmount
++    // tmpfs filesystems (container /dev, /run, /dev/shm, …) during setup/teardown.
++    // The old TODO() called die()/abort(), which wedged the unmounting thread
++    // mid-`podman run` (holding libpod locks) and deadlocked the whole process.
++    // FIXME: free the tmp_inode tree (tmpfs_unmount_tree) to reclaim memory.
+     return 0;
+ }
+ 
+diff --git a/kernel/arch/arm64/calls.c b/kernel/arch/arm64/calls.c
+index 1f35c16..c30239e 100644
+--- a/kernel/arch/arm64/calls.c
++++ b/kernel/arch/arm64/calls.c
+@@ -107,7 +107,7 @@ syscall_t syscall_table[] = {
+     [94]  = (syscall_t) sys_exit_group,
+     [95]  = (syscall_t) sys_waitid,
+     [96]  = (syscall_t) sys_set_tid_address,
+-    [97]  = (syscall_t) syscall_stub, // unshare
++    [97]  = (syscall_t) sys_unshare,
+     [98]  = (syscall_t) sys_futex,
+     [99]  = (syscall_t) sys_set_robust_list,
+     [100] = (syscall_t) sys_get_robust_list,
+@@ -274,9 +274,9 @@ syscall_t syscall_table[] = {
+     [276] = (syscall_t) sys_renameat2,
+     [277] = (syscall_t) syscall_stub, // seccomp
+     [278] = (syscall_t) sys_getrandom,
+-    [279] = (syscall_t) syscall_silent_stub, // memfd_create
++    [279] = (syscall_t) sys_memfd_create,
+     [280] = (syscall_t) syscall_stub, // bpf
+-    [281] = (syscall_t) sys_execve, // execveat
++    [281] = (syscall_t) sys_execveat,
+     [282] = (syscall_t) syscall_stub, // userfaultfd
+     [283] = (syscall_t) syscall_silent_stub, // membarrier
+     [284] = (syscall_t) syscall_stub, // mlock2
+diff --git a/kernel/calls.h b/kernel/calls.h
+index 65a30c7..c7eea76 100644
+--- a/kernel/calls.h
++++ b/kernel/calls.h
+@@ -30,9 +30,12 @@ int must_check user_write_string(addr_t addr, const char *buf);
+ 
+ // process lifecycle
+ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid);
++dword_t sys_unshare(dword_t flags);
+ dword_t sys_fork(void);
+ dword_t sys_vfork(void);
+ dword_t sys_execve(addr_t file, addr_t argv, addr_t envp);
++dword_t sys_execveat(fd_t dirfd, addr_t path_addr, addr_t argv_addr, addr_t envp_addr, dword_t flags);
++dword_t sys_memfd_create(addr_t name_addr, dword_t flags);
+ int do_execve(const char *file, size_t argc, const char *argv, const char *envp);
+ dword_t sys_exit(dword_t status);
+ noreturn void do_exit(int status);
+@@ -207,7 +210,14 @@ dword_t sys_statx(fd_t at_f, addr_t path_addr, int_t flags, uint_t mask, addr_t
+ #define MS_NOSUID_ (1 << 1)
+ #define MS_NODEV_ (1 << 2)
+ #define MS_NOEXEC_ (1 << 3)
++#define MS_REMOUNT_ (1 << 5)
++#define MS_BIND_ (1 << 12)
++#define MS_REC_ (1 << 14)
+ #define MS_SILENT_ (1 << 15)
++#define MS_UNBINDABLE_ (1 << 17)
++#define MS_PRIVATE_ (1 << 18)
++#define MS_SLAVE_ (1 << 19)
++#define MS_SHARED_ (1 << 20)
+ dword_t sys_mount(addr_t source_addr, addr_t target_addr, addr_t type_addr, dword_t flags, addr_t data_addr);
+ dword_t sys_umount2(addr_t target_addr, dword_t flags);
+ 
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 430a584..b2493fa 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -12,6 +12,7 @@
+ 
+ #include "misc.h"
+ #include "kernel/calls.h"
++#include "fs/path.h"
+ #include "kernel/random.h"
+ #include "kernel/errno.h"
+ #include "fs/fd.h"
+@@ -662,35 +663,31 @@ static int shebang_exec(struct fd *fd, const char *file, struct exec_args argv,
+     return err;
+ }
+ 
+-int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) {
+-    ISH_SIGNPOST_SCOPE_BEGIN(exec, "execve", _exec_spid);
+-    ISH_SIGNPOST_EVENT(exec, "execve_path", "path=%{public}s", file);
++// Core exec on an already-open fd. `file` is a display/comm name (synthetic for
++// anonymous fds). Does NOT close fd — the caller owns it. Shared by __do_execve
++// (path-based) and sys_execveat/fexecve (fd-based, e.g. crun's memfd re-exec,
++// where the file is anonymous and has no path to reopen).
++static int do_execve_fd(struct fd *fd, const char *file, struct exec_args argv, struct exec_args envp, bool check_exec_perm) {
+     // New program starts fresh — clear V8 abort-in-progress flag so the
+     // fresh process's stderr isn't permanently muted from a prior abort.
+     if (current && current->group)
+         current->group->v8_aborting = false;
+ 
+-    struct fd *fd = generic_open(file, O_RDONLY, 0);
+-    if (IS_ERR(fd))
+-        return PTR_ERR(fd);
+-
+     struct statbuf stat;
+     int err = fd->mount->fs->fstat(fd, &stat);
+-    if (err < 0) {
+-        fd_close(fd);
++    if (err < 0)
+         return err;
+-    }
+ 
+-    // if nobody has permission to execute, it should be safe to not execute
+-    if (!(stat.mode & 0111)) {
+-        fd_close(fd);
++    // if nobody has permission to execute, it should be safe to not execute.
++    // Skipped for fexecve (execveat AT_EMPTY_PATH): the caller already opened the
++    // fd intending to exec it, and the file may legitimately lack the exec bit
++    // (e.g. crun bind-mounts a read-only 0644 copy of itself and fexecve's it).
++    if (check_exec_perm && !(stat.mode & 0111))
+         return _EACCES;
+-    }
+ 
+     err = format_exec(fd, file, argv, envp);
+     if (err == _ENOEXEC)
+         err = shebang_exec(fd, file, argv, envp);
+-    fd_close(fd);
+     if (err < 0)
+         return err;
+ 
+@@ -743,10 +740,21 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp)
+         unlock(&pids_lock);
+     }
+ 
+-    ISH_SIGNPOST_SCOPE_END(exec, "execve", _exec_spid);
+     return 0;
+ }
+ 
++int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) {
++    ISH_SIGNPOST_SCOPE_BEGIN(exec, "execve", _exec_spid);
++    ISH_SIGNPOST_EVENT(exec, "execve_path", "path=%{public}s", file);
++    struct fd *fd = generic_open(file, O_RDONLY, 0);
++    if (IS_ERR(fd))
++        return PTR_ERR(fd);
++    int err = do_execve_fd(fd, file, argv, envp, true);
++    fd_close(fd);
++    ISH_SIGNPOST_SCOPE_END(exec, "execve", _exec_spid);
++    return err;
++}
++
+ int do_execve(const char *file, size_t argc, const char *argv_p, const char *envp_p) {
+     struct exec_args argv = {.count = argc, .args = argv_p};
+     struct exec_args envp = {.args = envp_p};
+@@ -1042,3 +1050,94 @@ err_free_argv:
+     free(argv);
+     return err;
+ }
++
++// memfd_create(2): an anonymous, exec-loadable file. iOS has no real memfd, so
++// back it with a /tmp file that we immediately unlink — the still-open fd keeps
++// the (host-backed) data alive with no path, which is exactly memfd semantics.
++// Created mode 0777 (Linux memfds are executable) so fexecve works. Used by
++// crun's CVE-2019-5736 re-exec: memfd_create → sendfile self in →
++// execveat(fd, "", AT_EMPTY_PATH) (fexecve). The previous stub returned ENOSYS,
++// forcing crun down a /proc/self/fd fallback that iSH couldn't satisfy either,
++// which broke `podman run`.
++#define MFD_CLOEXEC_ 0x1
++dword_t sys_memfd_create(addr_t name_addr, dword_t flags) {
++    char name[256];
++    if (user_read_string(name_addr, name, sizeof(name)))
++        return _EFAULT;
++    STRACE("memfd_create(\"%s\", %#x)", name, flags);
++    static unsigned counter;
++    for (int attempt = 0; attempt < 1000; attempt++) {
++        unsigned n = __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
++        char path[64];
++        snprintf(path, sizeof(path), "/tmp/.ish-memfd.%d.%u", current->pid, n);
++        struct fd *fd = generic_open(path, O_RDWR_ | O_CREAT_ | O_EXCL_, 0777);
++        if (IS_ERR(fd)) {
++            if (PTR_ERR(fd) == _EEXIST)
++                continue;
++            return PTR_ERR(fd);
++        }
++        // Unlink the name immediately; the open fd keeps the data alive.
++        generic_unlinkat(AT_PWD, path);
++        return f_install(fd, (flags & MFD_CLOEXEC_) ? O_CLOEXEC_ : 0);
++    }
++    return _EEXIST;
++}
++
++// execveat(2). The AT_EMPTY_PATH case (fexecve) executes straight from a file
++// descriptor — required for crun's memfd re-exec, where the file is anonymous
++// and has no path to reopen. (The old syscall table aliased this to sys_execve,
++// whose signature doesn't even match.) No env injection here: a re-exec inherits
++// the already-injected environment from its first exec.
++dword_t sys_execveat(fd_t dirfd, addr_t path_addr, addr_t argv_addr, addr_t envp_addr, dword_t flags) {
++    char path[MAX_PATH];
++    if (user_read_string(path_addr, path, sizeof(path)))
++        return _EFAULT;
++
++    int err = _ENOMEM;
++    char *argv = malloc(ARGV_MAX);
++    if (argv == NULL)
++        goto out_argv;
++    ssize_t argc = user_read_string_array(argv_addr, argv, ARGV_MAX);
++    if (argc < 0) { err = argc; goto out_argv; }
++    char *envp = malloc(ARGV_MAX);
++    if (envp == NULL)
++        goto out_envp;
++    if (envp_addr != 0) {
++        err = user_read_string_array(envp_addr, envp, ARGV_MAX);
++        if (err < 0) goto out_envp;
++    } else {
++        envp[0] = envp[1] = '\0';
++    }
++    STRACE("execveat(%d, \"%.500s\", argv, envp, %#x)", dirfd, path, flags);
++
++    struct exec_args argv_a = {.count = (size_t) argc, .args = argv};
++    struct exec_args envp_a = {.args = envp};
++    for (const char *e = envp; *e != '\0'; e += strlen(e) + 1)
++        envp_a.count++;
++
++    if ((flags & AT_EMPTY_PATH_) && path[0] == '\0') {
++        struct fd *fd = f_get(dirfd);
++        if (fd == NULL) { err = _EBADF; goto out_envp; }
++        // fexecve: load straight from the (possibly anonymous) fd. Don't close
++        // it — it's the caller's; cloexec handling reaps it if marked.
++        err = do_execve_fd(fd, "fexecve", argv_a, envp_a, false);
++    } else {
++        struct fd *fd;
++        if (dirfd == AT_FDCWD_ || path[0] == '/') {
++            fd = generic_open(path, O_RDONLY, 0);
++        } else {
++            struct fd *at = f_get(dirfd);
++            if (at == NULL) { err = _EBADF; goto out_envp; }
++            fd = generic_openat(at, path, O_RDONLY, 0);
++        }
++        if (IS_ERR(fd)) { err = PTR_ERR(fd); goto out_envp; }
++        err = do_execve_fd(fd, path, argv_a, envp_a, true);
++        fd_close(fd);
++    }
++
++out_envp:
++    free(envp);
++out_argv:
++    free(argv);
++    return err;
++}
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f8b0287..150625a 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -159,10 +159,28 @@ fail_free_mem:
+     return err;
+ }
+ 
++// Namespace flags: we don't implement real namespace isolation, but container
++// runtimes (podman/crun) clone into new namespaces and fail with EINVAL if the
++// flags are rejected. Accept and ignore them so they proceed (no isolation) —
++// the child is an ordinary process/thread that shares the global namespaces.
++#define NS_FLAGS (CLONE_NEWNS_|CLONE_NEWCGROUP_|CLONE_NEWUTS_|CLONE_NEWIPC_|CLONE_NEWUSER_|CLONE_NEWPID_|CLONE_NEWNET_)
++
++// unshare(2): detach the caller from namespaces / shared resources. iSH has no
++// real namespaces, but container tooling relies on it succeeding — e.g.
++// containers/storage's `storage-applyLayer` does unshare(CLONE_NEWNS) before
++// extracting an image layer and aborts ("creating mount namespace before pivot
++// root") if it fails. The previous stub returned ENOSYS. Accept the namespace
++// and resource-unshare flags as a no-op (the caller keeps sharing the global
++// namespaces) so layer extraction / container setup proceeds.
++dword_t sys_unshare(dword_t flags) {
++    STRACE("unshare(0x%x)", flags);
++    return 0;
++}
++
+ dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid) {
+     STRACE("clone(0x%x, 0x%x, 0x%x, 0x%x, 0x%x)", flags, stack, ptid, tls, ctid);
+-    if (flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS) {
+-        FIXME("unimplemented clone flags 0x%x", flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS);
++    if (flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS & ~NS_FLAGS) {
++        FIXME("unimplemented clone flags 0x%x", flags & ~CSIGNAL_ & ~IMPLEMENTED_FLAGS & ~NS_FLAGS);
+         return _EINVAL;
+     }
+     if (flags & CLONE_SIGHAND_ && !(flags & CLONE_VM_))
+diff --git a/kernel/fs.c b/kernel/fs.c
+index dcca77a..62fc470 100644
+--- a/kernel/fs.c
++++ b/kernel/fs.c
+@@ -854,6 +854,18 @@ dword_t sys_umask(dword_t mask) {
+     return old_umask;
+ }
+ 
++// crun's detect_cgroup_mode() statfs("/sys/fs/cgroup") and errors with "invalid
++// file system type" unless f_type is CGROUP2_SUPER_MAGIC (unified v2) or
++// TMPFS_MAGIC (v1). iSH backs /sys with the fakefs, so report the cgroup2 magic
++// for /sys/fs/cgroup (matches the unified /proc/<pid>/cgroup "0::/" we report).
++#define CGROUP2_SUPER_MAGIC_ 0x63677270
++static void statfs_magic_override(const char *path, struct statfsbuf *stat) {
++    if (path != NULL &&
++        (strcmp(path, "/sys/fs/cgroup") == 0 ||
++         strncmp(path, "/sys/fs/cgroup/", 15) == 0))
++        stat->type = CGROUP2_SUPER_MAGIC_;
++}
++
+ static int mount_statfs(struct mount *mount, struct statfsbuf *stat) {
+     int err = 0;
+     if (mount->fs->statfs)
+@@ -863,11 +875,12 @@ static int mount_statfs(struct mount *mount, struct statfsbuf *stat) {
+     return err;
+ }
+ 
+-static int_t statfs_mount(struct mount *mount, addr_t buf_addr) {
++static int_t statfs_mount(struct mount *mount, addr_t buf_addr, const char *path) {
+     struct statfsbuf buf = {};
+     int err = mount_statfs(mount, &buf);
+     if (err < 0)
+         return err;
++    statfs_magic_override(path, &buf);
+     struct statfs_ out_buf = {
+         .type = buf.type,
+         .bsize = buf.bsize,
+@@ -886,11 +899,12 @@ static int_t statfs_mount(struct mount *mount, addr_t buf_addr) {
+     return 0;
+ }
+ 
+-static int_t statfs64_mount(struct mount *mount, addr_t buf_addr) {
++static int_t statfs64_mount(struct mount *mount, addr_t buf_addr, const char *path) {
+     struct statfsbuf buf = {};
+     int err = mount_statfs(mount, &buf);
+     if (err < 0)
+         return err;
++    statfs_magic_override(path, &buf);
+     struct statfs64_ out_buf = {
+         .type = buf.type,
+         .bsize = buf.bsize,
+@@ -919,7 +933,7 @@ dword_t sys_statfs(addr_t path_addr, addr_t buf_addr) {
+     if (err < 0)
+         return err;
+     struct mount *mount = mount_find(path);
+-    err = statfs_mount(mount, buf_addr);
++    err = statfs_mount(mount, buf_addr, path);
+     mount_release(mount);
+     return err;
+ }
+@@ -936,27 +950,28 @@ dword_t sys_statfs64(addr_t path_addr, dword_t buf_size, addr_t buf_addr) {
+     if (err < 0)
+         return err;
+     struct mount *mount = mount_find(path);
+-    err = statfs64_mount(mount, buf_addr);
++    err = statfs64_mount(mount, buf_addr, path);
+     mount_release(mount);
+     return err;
+ }
+ 
+ dword_t sys_fstatfs(fd_t f, addr_t buf_addr) {
+-    return statfs_mount(f_get(f)->mount, buf_addr);
++    return statfs_mount(f_get(f)->mount, buf_addr, NULL);
+ }
+ 
+ dword_t sys_fstatfs64(fd_t f, addr_t buf_addr) {
+-    return statfs64_mount(f_get(f)->mount, buf_addr);
++    return statfs64_mount(f_get(f)->mount, buf_addr, NULL);
+ }
+ 
+ #if defined(GUEST_ARM64)
+ // ARM64 uses statfs (not statfs64) with a different structure layout
+ // The structure uses 64-bit fields throughout (LP64 ABI)
+-static int_t statfs_arm64_mount(struct mount *mount, addr_t buf_addr) {
++static int_t statfs_arm64_mount(struct mount *mount, addr_t buf_addr, const char *path) {
+     struct statfsbuf buf = {};
+     int err = mount_statfs(mount, &buf);
+     if (err < 0)
+         return err;
++    statfs_magic_override(path, &buf);
+     struct statfs_arm64_ out_buf = {
+         .type = buf.type,
+         .bsize = buf.bsize,
+@@ -985,7 +1000,7 @@ dword_t sys_statfs_arm64(addr_t path_addr, addr_t buf_addr) {
+     if (err < 0)
+         return err;
+     struct mount *mount = mount_find(path);
+-    err = statfs_arm64_mount(mount, buf_addr);
++    err = statfs_arm64_mount(mount, buf_addr, path);
+     mount_release(mount);
+     return err;
+ }
+@@ -995,7 +1010,7 @@ dword_t sys_fstatfs_arm64(fd_t f, addr_t buf_addr) {
+     struct fd *fd = f_get(f);
+     if (fd == NULL)
+         return _EBADF;
+-    return statfs_arm64_mount(fd->mount, buf_addr);
++    return statfs_arm64_mount(fd->mount, buf_addr, NULL);
+ }
+ #endif
+ 
+diff --git a/kernel/futex.c b/kernel/futex.c
+index 00386b1..f913b7e 100644
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -504,9 +504,17 @@ int_t sys_set_robust_list(addr_t robust_list, dword_t len) {
+ int_t sys_get_robust_list(pid_t_ pid, addr_t robust_list_ptr, addr_t len_ptr) {
+     STRACE("get_robust_list(%d, %#x, %#x)", pid, robust_list_ptr, len_ptr);
+ 
+-    lock(&pids_lock);
+-    struct task *task = pid_get_task(pid);
+-    unlock(&pids_lock);
++    // pid 0 means "the calling thread" (Linux convention). pid_get_task(0)
++    // finds no task, so the naive `task != current` check below rejected it
++    // with EPERM — which broke musl's robust-mutex setup (it probes with
++    // get_robust_list(0, …)) and surfaced as podman's "failed to create N
++    // locks: operation not permitted".
++    struct task *task = current;
++    if (pid != 0) {
++        lock(&pids_lock);
++        task = pid_get_task(pid);
++        unlock(&pids_lock);
++    }
+     if (task != current)
+         return _EPERM;
+ 
+diff --git a/kernel/getset.c b/kernel/getset.c
+index 8edf84f..ef27bbe 100644
+--- a/kernel/getset.c
++++ b/kernel/getset.c
+@@ -40,29 +40,18 @@ dword_t sys_geteuid() {
+     return current->euid & 0xffff;
+ }
+ 
++// iSH is a single-user emulator with no real uid-based security (passwordless su,
++// faked user namespaces for containers), so set*id always succeed — rejecting
++// them broke rootless podman ("cannot setresgid: Operation not permitted") where
++// crun drops to a mapped uid/gid.
+ int_t sys_setuid(uid_t_ uid) {
+     STRACE("setuid(%d)", uid);
+-    if (superuser()) {
+-        current->uid = current->suid = uid;
+-    } else {
+-        if (uid != current->uid && uid != current->suid)
+-            return _EPERM;
+-    }
+-    current->euid = uid;
++    current->uid = current->suid = current->euid = uid;
+     return 0;
+ }
+ 
+ dword_t sys_setresuid(uid_t_ ruid, uid_t_ euid, uid_t_ suid) {
+     STRACE("setresuid(%d, %d, %d)", ruid, euid, suid);
+-    if (!superuser()) {
+-        if (ruid != (uid_t) -1 && ruid != current->uid && ruid != current->euid && ruid != current->suid)
+-            return _EPERM;
+-        if (euid != (uid_t) -1 && euid != current->uid && euid != current->euid && euid != current->suid)
+-            return _EPERM;
+-        if (suid != (uid_t) -1 && suid != current->uid && suid != current->euid && suid != current->suid)
+-            return _EPERM;
+-    }
+-
+     if (ruid != (uid_t) -1)
+         current->uid = ruid;
+     if (euid != (uid_t) -1)
+@@ -107,27 +96,12 @@ dword_t sys_getegid() {
+ 
+ int_t sys_setgid(uid_t_ gid) {
+     STRACE("setgid(%d)", gid);
+-    if (superuser()) {
+-        current->gid = current->sgid = gid;
+-    } else {
+-        if (gid != current->gid && gid != current->sgid)
+-            return _EPERM;
+-    }
+-    current->egid = gid;
++    current->gid = current->sgid = current->egid = gid;
+     return 0;
+ }
+ 
+ dword_t sys_setresgid(uid_t_ rgid, uid_t_ egid, uid_t_ sgid) {
+     STRACE("setresgid(%d, %d, %d)", rgid, egid, sgid);
+-    if (!superuser()) {
+-        if (rgid != (uid_t) -1 && rgid != current->gid && rgid != current->egid && rgid != current->sgid)
+-            return _EPERM;
+-        if (egid != (uid_t) -1 && egid != current->gid && egid != current->egid && egid != current->sgid)
+-            return _EPERM;
+-        if (sgid != (uid_t) -1 && sgid != current->gid && sgid != current->egid && sgid != current->sgid)
+-            return _EPERM;
+-    }
+-
+     if (rgid != (uid_t) -1)
+         current->gid = rgid;
+     if (egid != (uid_t) -1)
+@@ -177,11 +151,48 @@ int_t sys_setgroups(dword_t size, addr_t list) {
+     return 0;
+ }
+ 
+-// this does not really work
++// Linux capability ABI (uapi/linux/capability.h).
++#define _LINUX_CAPABILITY_VERSION_1 0x19980330
++#define _LINUX_CAPABILITY_VERSION_2 0x20071026
++#define _LINUX_CAPABILITY_VERSION_3 0x20080522
++struct cap_user_header { dword_t version; int_t pid; };
++struct cap_user_data { dword_t effective, permitted, inheritable; };
++
++// We don't enforce capabilities, but container runtimes (crun/podman) probe the
++// kernel's capability version with capget and refuse to start ("unknown
++// capability version") if it isn't reported back. Report v3 and full
++// permitted/effective caps. (The old stub returned 0 and wrote nothing.)
+ int_t sys_capget(addr_t header_addr, addr_t data_addr) {
+     STRACE("capget(%#x, %#x)", header_addr, data_addr);
++    struct cap_user_header header;
++    if (user_get(header_addr, header))
++        return _EFAULT;
++    unsigned datums;
++    switch (header.version) {
++        case _LINUX_CAPABILITY_VERSION_1: datums = 1; break;
++        case _LINUX_CAPABILITY_VERSION_2:
++        case _LINUX_CAPABILITY_VERSION_3: datums = 2; break;
++        default:
++            // Probe / unsupported version: report our preferred version and fail
++            // so the caller retries with it (matches Linux capget semantics).
++            header.version = _LINUX_CAPABILITY_VERSION_3;
++            if (user_put(header_addr, header))
++                return _EFAULT;
++            return _EINVAL;
++    }
++    if (data_addr != 0) {
++        struct cap_user_data data[2] = {};
++        for (unsigned i = 0; i < datums; i++) {
++            data[i].effective = 0xffffffff;
++            data[i].permitted = 0xffffffff;
++            data[i].inheritable = 0;
++        }
++        if (user_write(data_addr, data, datums * sizeof(data[0])))
++            return _EFAULT;
++    }
+     return 0;
+ }
++// Capabilities aren't enforced, so accept any set (no-op success).
+ int_t sys_capset(addr_t header_addr, addr_t data_addr) {
+     STRACE("capset(%#x, %#x)", header_addr, data_addr);
+     return 0;
+diff --git a/kernel/misc.c b/kernel/misc.c
+index d86db45..77ca1e3 100644
+--- a/kernel/misc.c
++++ b/kernel/misc.c
+@@ -1,14 +1,31 @@
+ #include <string.h>
+ #include "kernel/calls.h"
+ 
++#define PRCTL_SET_PDEATHSIG_ 1
++#define PRCTL_SET_DUMPABLE_ 4
+ #define PRCTL_SET_KEEPCAPS_ 8
+ #define PRCTL_SET_NAME_ 15
++#define PRCTL_SET_CHILD_SUBREAPER_ 36
++#define PRCTL_GET_CHILD_SUBREAPER_ 37
++#define PRCTL_SET_NO_NEW_PRIVS_ 38
+ 
+ int_t sys_prctl(dword_t option, addr_t arg2, addr_t UNUSED(arg3), addr_t UNUSED(arg4), addr_t UNUSED(arg5)) {
+     switch (option) {
+         case PRCTL_SET_KEEPCAPS_:
+             // stub
+             return 0;
++        // iSH has no real process hierarchy/security flags, but container tooling
++        // sets these and aborts on failure: conmon does
++        // prctl(PR_SET_CHILD_SUBREAPER) ("Failed to set as subreaper") before it
++        // will launch crun; crun sets PR_SET_NO_NEW_PRIVS / PR_SET_PDEATHSIG /
++        // PR_SET_DUMPABLE during container setup. Accept them as no-ops.
++        case PRCTL_SET_CHILD_SUBREAPER_:
++        case PRCTL_GET_CHILD_SUBREAPER_:
++        case PRCTL_SET_NO_NEW_PRIVS_:
++        case PRCTL_SET_PDEATHSIG_:
++        case PRCTL_SET_DUMPABLE_:
++            STRACE("prctl(%#x) [no-op]", option);
++            return 0;
+         case PRCTL_SET_NAME_: {
+             char name[16];
+             if (user_read_string(arg2, name, sizeof(name) - 1))
+diff --git a/kernel/task.c b/kernel/task.c
+index a61f430..cdda21c 100644
+--- a/kernel/task.c
++++ b/kernel/task.c
+@@ -106,43 +106,27 @@ struct task *task_create_(struct task *parent) {
+     return task;
+ }
+ 
+-// Deferred-free list for task structs.
+-// When a task is destroyed, its struct is not immediately freed — instead it's
+-// placed on this list. The NEXT call to task_destroy will free previously
+-// deferred structs. This gives leaked/exiting pthreads time to finish accessing
+-// `current` before the memory is recycled by malloc, preventing use-after-free
+-// heap corruption.
+-#define DEFERRED_FREE_MAX 64
+-static struct task *deferred_free_list[DEFERRED_FREE_MAX];
+-static int deferred_free_count = 0;
+-// Must be called with pids_lock held (task_destroy already requires this).
+-static void flush_deferred_frees(void) {
+-    for (int i = 0; i < deferred_free_count; i++) {
+-        free(deferred_free_list[i]);
+-        deferred_free_list[i] = NULL;
+-    }
+-    deferred_free_count = 0;
+-}
+-
+ void task_destroy(struct task *task) {
+     list_remove(&task->siblings);
+     pid_get(task->pid)->task = NULL;
+ 
+-    // Flush old deferred frees first — they've had time to quiesce.
+-    flush_deferred_frees();
+-
+-    // Zero the struct to poison stale `current` references, then defer the
+-    // actual free. This way if a leaked pthread is still running, it will
+-    // hit zeroed fields (NULL group, NULL mem) and crash cleanly rather than
+-    // silently corrupting a newly-allocated task at the same address.
++    // Poison the struct so a still-running detached pthread that holds this as
++    // `current` sees NULL group/mem and exits cleanly via task_run_current's
++    // checks (rather than dereferencing freed sub-structures).
+     memset(task, 0, sizeof(struct task));
+ 
+-    if (deferred_free_count < DEFERRED_FREE_MAX) {
+-        deferred_free_list[deferred_free_count++] = task;
+-    } else {
+-        // Overflow — free immediately (rare, only with 64+ concurrent exits)
+-        free(task);
+-    }
++    // Then intentionally LEAK it — never free a task struct. A guest thread that
++    // missed the group-exit SIGKILL window (do_exit_group only *polls* for
++    // detached siblings with a ~5s timeout) can still be inside the JIT writing
++    // current->cpu after we get here. This is common on-device, where the
++    // emulator is slow enough that threads routinely miss the timeout — which is
++    // why the crash reproduced on device but not the (faster) simulator.
++    // Recycling this memory caused use-after-free heap corruption ("BUG IN
++    // CLIENT OF LIBMALLOC: corruption of free block") under heavy thread churn
++    // (e.g. tmux's multi-threaded server, and any threaded runtime). Leaking
++    // ~sizeof(struct task) per exited task is the safe trade; a proper task
++    // refcount (free only once both the reaper and the owning pthread are done)
++    // would bound it and is the natural follow-up.
+ }
+ 
+ static void task_run_tlb_cleanup(void *arg) {

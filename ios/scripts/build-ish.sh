@@ -44,52 +44,29 @@ echo "[2/7] Pinning + patching ish-arm64…"
   git fetch --depth 1 origin "$ISH_COMMIT" 2>/dev/null || true
   git checkout -q "$ISH_COMMIT"
   git submodule update --init --recursive >/dev/null 2>&1 || true
-  # Upstream's bits.S and math.S both define sxtw/uxtb/uxth/rev32; math.S is the
-  # canonical version (it consumes the `sf`/packed param word the decoder emits),
-  # so drop the stale simple copies from bits.S. Without this the app fails to
-  # link under -force_load (duplicate gadget symbols). Idempotent: skip if applied.
-  if git apply --reverse --check "$SCRIPTS/ish-arm64-gadget-dedup.patch" >/dev/null 2>&1; then
-    echo "  gadget-dedup already applied"
+  # One consolidated patch (ish-arm64-ios.patch) carries every iSH engine change
+  # we need. Generated with `git diff` against $ISH_COMMIT, so it re-applies
+  # cleanly to a fresh checkout. Idempotent: skip if already applied. Contents:
+  #   - gadget-dedup: bits.S and math.S both define sxtw/uxtb/uxth/rev32; drop the
+  #     stale bits.S copies (else duplicate gadget symbols fail the -force_load link).
+  #   - task-uaf: never recycle task structs — detached guest pthreads write
+  #     current->cpu after task_destroy, and reuse caused heap corruption that
+  #     crashed the app under threaded runtimes (tmux/node).
+  #   - OCI/container support (podman + crun + conmon):
+  #       capget v3 + full caps; /proc/<pid>/status, /mountinfo, /mounts, /cgroup;
+  #       tolerate CLONE_NEW*/unshare/mount-propagation/MS_BIND/MS_REMOUNT (+ bind
+  #       umount); relaxed set*id; /proc uid_map/gid_map/setgroups; get_robust_list
+  #       pid 0; memfd_create + execveat(AT_EMPTY_PATH)/fexecve + F_ADD/GET_SEALS
+  #       (crun CVE-2019-5736 self-clone); PR_SET_CHILD_SUBREAPER/NO_NEW_PRIVS/…;
+  #       cgroup2 statfs magic; never die() on tmpfs umount.
+  #     These get podman through pull → vfs storage → container create → conmon →
+  #     crun; the container-init namespace-bootstrap sync is still unsupported
+  #     (iSH has no real namespaces), so containers don't fully start yet.
+  if git apply --reverse --check "$SCRIPTS/ish-arm64-ios.patch" >/dev/null 2>&1; then
+    echo "  ish-arm64-ios already applied"
   else
-    git apply "$SCRIPTS/ish-arm64-gadget-dedup.patch"
-    echo "  gadget-dedup applied"
-  fi
-  # task-uaf: detached guest pthreads that miss do_exit_group's SIGKILL timeout
-  # keep writing current->cpu from the JIT after task_destroy; recycling the task
-  # struct caused use-after-free heap corruption ("corruption of free block") that
-  # crashed the app under threaded runtimes (tmux, node, etc.) on-device. Stop
-  # recycling task structs (leak them). Idempotent: skip if applied.
-  if git apply --reverse --check "$SCRIPTS/ish-arm64-task-uaf.patch" >/dev/null 2>&1; then
-    echo "  task-uaf already applied"
-  else
-    git apply "$SCRIPTS/ish-arm64-task-uaf.patch"
-    echo "  task-uaf applied"
-  fi
-  # capget: the stub returned 0 without reporting a capability version, so OCI
-  # runtimes (crun/podman) failed with "unknown capability version". Implement it
-  # (report v3 + full caps; we don't enforce capabilities). Idempotent.
-  if git apply --reverse --check "$SCRIPTS/ish-arm64-capget.patch" >/dev/null 2>&1; then
-    echo "  capget already applied"
-  else
-    git apply "$SCRIPTS/ish-arm64-capget.patch"
-    echo "  capget applied"
-  fi
-  # proc-status: add /proc/<pid>/status (uid/gid/caps). OCI runtimes read
-  # /proc/self/status and abort ("no such file or directory") without it. Idempotent.
-  if git apply --reverse --check "$SCRIPTS/ish-arm64-proc-status.patch" >/dev/null 2>&1; then
-    echo "  proc-status already applied"
-  else
-    git apply "$SCRIPTS/ish-arm64-proc-status.patch"
-    echo "  proc-status applied"
-  fi
-  # clone-ns: tolerate (ignore) CLONE_NEW* namespace flags so container runtimes
-  # can clone into "new" namespaces instead of failing with EINVAL ("cannot
-  # clone: Invalid argument"). No real isolation. Idempotent.
-  if git apply --reverse --check "$SCRIPTS/ish-arm64-clone-ns.patch" >/dev/null 2>&1; then
-    echo "  clone-ns already applied"
-  else
-    git apply "$SCRIPTS/ish-arm64-clone-ns.patch"
-    echo "  clone-ns applied"
+    git apply "$SCRIPTS/ish-arm64-ios.patch"
+    echo "  ish-arm64-ios applied"
   fi )
 
 echo "[3/7] Cross-compiling ish-arm64 core for iOS arm64…"

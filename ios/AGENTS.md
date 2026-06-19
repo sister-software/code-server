@@ -91,14 +91,22 @@ applied on top of vanilla `lib/vscode` only during the iOS build — they are
 ### Terminal: ish-arm64 (OpenMinis/ish-arm64)
 
 `build-ish.sh` clones `OpenMinis/ish-arm64` (GPLv3) pinned to a commit, applies
-`scripts/ish-arm64-gadget-dedup.patch` (upstream defines four Asbestos gadgets
-twice → duplicate-symbol link failure under `-force_load`), cross-compiles
-arm64 device **and** simulator libs, and builds an **arm64** Alpine fakefs. The C
-bridge (`Remote/Ish/IshBridge.{c,h}`, driven by `IshTerminal.swift`) boots one
-guest and multiplexes terminals + a guest-fs API. Same-arch interpreter (no
-JIT/RWX) — runs on stock iOS. (OpenMinis is the canonical home of the ARM64
-Asbestos backend; `rcarmo/ios-linuxkit`, used earlier, is a squashed snapshot of
-it plus an iOS app shell we don't use.)
+one consolidated `scripts/ish-arm64-ios.patch` (a `git diff` against that commit,
+so it re-applies cleanly), cross-compiles arm64 device **and** simulator libs, and
+builds an **arm64** Alpine fakefs. The C bridge (`Remote/Ish/IshBridge.{c,h}`,
+driven by `IshTerminal.swift`) boots one guest and multiplexes terminals + a
+guest-fs API. Same-arch interpreter (no JIT/RWX) — runs on stock iOS. (OpenMinis
+is the canonical home of the ARM64 Asbestos backend; `rcarmo/ios-linuxkit`, used
+earlier, is a squashed snapshot of it plus an iOS app shell we don't use.)
+
+`ish-arm64-ios.patch` carries the link fix (duplicate Asbestos gadget symbols),
+the task-UAF heap-corruption fix, and a large OCI/container layer (capget, procfs
+status/mountinfo/cgroup, namespace/mount-flag tolerance incl. MS_BIND, memfd +
+fexecve, cgroup2 statfs, …) that gets `podman run` through pull → container create
+→ conmon → crun. Containers don't fully start yet — crun's namespace-bootstrap
+sync assumes real namespaces, which iSH fakes. To re-derive the patch after
+editing `Vendor/ish-arm64`: `cd Vendor/ish-arm64 && git diff > scripts/ish-arm64-ios.patch`.
+podman + the `vfs` storage.conf are baked into the rootfs (`scripts/rootfs.Dockerfile`).
 
 ## Source layout (`CodeServerClient/`)
 

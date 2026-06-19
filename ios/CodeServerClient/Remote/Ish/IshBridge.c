@@ -44,6 +44,28 @@ static void create_device_nodes(void) {
     generic_mkdirat(AT_PWD, "/dev/pts", 0755);
 }
 
+// Minimal cgroup v2 (unified) hierarchy. crun reports the container's cgroup
+// mode from statfs("/sys/fs/cgroup") (we fake CGROUP2_SUPER_MAGIC) and then
+// reads/writes the unified control files; without them it aborts ("error
+// reading from file `/sys/fs/cgroup/cgroup.controllers`"). iSH enforces no
+// resource limits, so an empty controllers set is fine — crun creates its
+// sub-cgroups as ordinary writable fakefs dirs and the writes are no-ops.
+static void create_cgroupfs(void) {
+    generic_mkdirat(AT_PWD, "/sys", 0755);
+    generic_mkdirat(AT_PWD, "/sys/fs", 0755);
+    generic_mkdirat(AT_PWD, "/sys/fs/cgroup", 0755);
+    static const char *const files[] = {
+        "/sys/fs/cgroup/cgroup.controllers",     // empty: no controllers offered
+        "/sys/fs/cgroup/cgroup.subtree_control", // writable no-op
+        "/sys/fs/cgroup/cgroup.procs",           // writable no-op
+    };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        struct fd *fd = generic_open(files[i], O_CREAT_ | O_WRONLY_, 0644);
+        if (!IS_ERR(fd))
+            fd_close(fd);
+    }
+}
+
 extern struct tty *pty_open_fake(struct tty_driver *driver);
 
 #define MAX_TERMS 32
@@ -250,6 +272,7 @@ static int boot_kernel(const char *fakefs_dir, int first_id, int cols, int rows)
     err = become_first_process();
     if (err < 0) return err;
     create_device_nodes();
+    create_cgroupfs();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     configure_dns();

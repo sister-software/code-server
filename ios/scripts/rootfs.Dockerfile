@@ -22,7 +22,8 @@ RUN apk add --no-cache \
       zsh \
       coreutils \
       gcompat \
-      libstdc++
+      libstdc++ \
+      podman
 
 # operator: zsh login shell, home /home/operator, no password (root su's in, and
 # sudo is passwordless below — no login password is ever needed).
@@ -45,10 +46,12 @@ RUN HOME=/home/operator zsh -fc 'autoload -Uz compinit && compinit -u -d /home/o
 
 # podman storage: iSH has no overlayfs and the fakefs lacks d_type, so the
 # default `overlay` driver can't work. Default to `vfs` (plain per-layer copies),
-# which works on any filesystem. Pre-seeded so podman uses it out of the box
-# (apk preserves this as a local config if podman is later installed).
-RUN mkdir -p /etc/containers \
- && printf '[storage]\ndriver = "vfs"\n' > /etc/containers/storage.conf
+# which works on any filesystem. graphroot/runroot are pinned explicitly: this
+# guest has no systemd/elogind, so /run/containers can't be auto-created and
+# podman bails with "runroot must be set". Both live under /var/lib/containers
+# (which podman owns) so they always exist and persist in the writable rootfs.
+RUN mkdir -p /etc/containers /var/lib/containers/storage /var/lib/containers/runroot \
+ && printf '[storage]\ndriver = "vfs"\ngraphroot = "/var/lib/containers/storage"\nrunroot = "/var/lib/containers/runroot"\n' > /etc/containers/storage.conf
 
 # First-boot setup script the user runs from the terminal.
 COPY bootstrap.sh /usr/local/bin/bootstrap.sh
