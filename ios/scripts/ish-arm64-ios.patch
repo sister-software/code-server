@@ -86,6 +86,20 @@ index 87849ee..4e33ab6 100644
          default:
              STRACE("fcntl(%d, %d)", f, cmd);
              return _EINVAL;
+diff --git a/fs/fd.h b/fs/fd.h
+index 4bd1f18..f1348a5 100644
+--- a/fs/fd.h
++++ b/fs/fd.h
+@@ -35,6 +35,9 @@ struct fd {
+         struct {
+             uint64_t val;
+         } eventfd;
++        struct {
++            uint64_t mask; // sigset of signals this signalfd reports
++        } signalfd;
+         struct {
+             struct timer *timer;
+             uint64_t expirations;
 diff --git a/fs/mount.c b/fs/mount.c
 index 68435ed..dc9c8ad 100644
 --- a/fs/mount.c
@@ -309,6 +323,46 @@ index 05861c7..5b6b475 100644
  });
  
  struct proc_dir_entry proc_pid = {NULL, S_IFDIR,
+diff --git a/fs/sock.c b/fs/sock.c
+index 38c8ed4..6337067 100644
+--- a/fs/sock.c
++++ b/fs/sock.c
+@@ -562,6 +562,14 @@ int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sock
+     int real_type = sock_type_to_real(type, protocol);
+     if (real_type < 0)
+         return _EINVAL;
++    // SOCK_SEQPACKET socketpairs need message framing (macOS maps SEQPACKET to
++    // STREAM in sock_type_to_real for the listen/accept path, but a socketpair is
++    // already connected and never listens). Use DGRAM here so message boundaries
++    // and SCM_RIGHTS ancillary data stay aligned — crun's container-init sync
++    // socket is a SOCK_SEQPACKET socketpair that passes mount fds and otherwise
++    // desyncs over a byte stream.
++    if ((type & 0xff) == SOCK_SEQPACKET_)
++        real_type = SOCK_DGRAM;
+ 
+     int sockets[2];
+     int err = socketpair(real_domain, real_type, protocol, sockets);
+diff --git a/fs/sock.h b/fs/sock.h
+index 6aeb2f7..9a92105 100644
+--- a/fs/sock.h
++++ b/fs/sock.h
+@@ -149,9 +149,13 @@ static inline int sock_type_to_real(int type, int protocol) {
+             }
+             return SOCK_DGRAM;
+         case SOCK_SEQPACKET_:
+-            // macOS doesn't support SOCK_SEQPACKET; for AF_UNIX,
+-            // SOCK_STREAM is functionally equivalent (reliable, ordered,
+-            // bidirectional). Rust std uses SOCK_SEQPACKET for spawn pipes.
++            // macOS doesn't support AF_UNIX SOCK_SEQPACKET. For socket()-based use
++            // (bind/listen/accept, e.g. conmon's attach socket) map to SOCK_STREAM
++            // — it's connection-oriented and can listen(). socketpair() callers
++            // that need SEQPACKET's message framing (crun's container-init sync,
++            // which passes fds via SCM_RIGHTS) instead get SOCK_DGRAM via a
++            // special case in sys_socketpair — DGRAM preserves boundaries and a
++            // socketpair is already connected, so listen() is never needed there.
+             if (protocol != 0)
+                 return -1;
+             return SOCK_STREAM;
 diff --git a/fs/tmp.c b/fs/tmp.c
 index 462ace4..7de4fa1 100644
 --- a/fs/tmp.c
@@ -331,9 +385,18 @@ index 462ace4..7de4fa1 100644
  }
  
 diff --git a/kernel/arch/arm64/calls.c b/kernel/arch/arm64/calls.c
-index 1f35c16..c30239e 100644
+index 1f35c16..2089842 100644
 --- a/kernel/arch/arm64/calls.c
 +++ b/kernel/arch/arm64/calls.c
+@@ -84,7 +84,7 @@ syscall_t syscall_table[] = {
+     [71]  = (syscall_t) sys_sendfile64,
+     [72]  = (syscall_t) sys_pselect,
+     [73]  = (syscall_t) sys_ppoll,
+-    [74]  = (syscall_t) syscall_stub, // signalfd4
++    [74]  = (syscall_t) sys_signalfd4,
+     [75]  = (syscall_t) syscall_stub, // vmsplice
+     [76]  = (syscall_t) sys_splice,
+     [77]  = (syscall_t) syscall_stub, // tee
 @@ -107,7 +107,7 @@ syscall_t syscall_table[] = {
      [94]  = (syscall_t) sys_exit_group,
      [95]  = (syscall_t) sys_waitid,
@@ -356,10 +419,10 @@ index 1f35c16..c30239e 100644
      [283] = (syscall_t) syscall_silent_stub, // membarrier
      [284] = (syscall_t) syscall_stub, // mlock2
 diff --git a/kernel/calls.h b/kernel/calls.h
-index 65a30c7..c7eea76 100644
+index 65a30c7..e7e757d 100644
 --- a/kernel/calls.h
 +++ b/kernel/calls.h
-@@ -30,9 +30,12 @@ int must_check user_write_string(addr_t addr, const char *buf);
+@@ -30,9 +30,13 @@ int must_check user_write_string(addr_t addr, const char *buf);
  
  // process lifecycle
  dword_t sys_clone(dword_t flags, addr_t stack, addr_t ptid, addr_t tls, addr_t ctid);
@@ -369,10 +432,11 @@ index 65a30c7..c7eea76 100644
  dword_t sys_execve(addr_t file, addr_t argv, addr_t envp);
 +dword_t sys_execveat(fd_t dirfd, addr_t path_addr, addr_t argv_addr, addr_t envp_addr, dword_t flags);
 +dword_t sys_memfd_create(addr_t name_addr, dword_t flags);
++fd_t sys_signalfd4(fd_t fd_no, addr_t mask_addr, dword_t mask_size, int_t flags);
  int do_execve(const char *file, size_t argc, const char *argv, const char *envp);
  dword_t sys_exit(dword_t status);
  noreturn void do_exit(int status);
-@@ -207,7 +210,14 @@ dword_t sys_statx(fd_t at_f, addr_t path_addr, int_t flags, uint_t mask, addr_t
+@@ -207,7 +211,14 @@ dword_t sys_statx(fd_t at_f, addr_t path_addr, int_t flags, uint_t mask, addr_t
  #define MS_NOSUID_ (1 << 1)
  #define MS_NODEV_ (1 << 2)
  #define MS_NOEXEC_ (1 << 3)
@@ -889,6 +953,142 @@ index d86db45..77ca1e3 100644
          case PRCTL_SET_NAME_: {
              char name[16];
              if (user_read_string(arg2, name, sizeof(name) - 1))
+diff --git a/kernel/signalfd.c b/kernel/signalfd.c
+new file mode 100644
+index 0000000..181a85d
+--- /dev/null
++++ b/kernel/signalfd.c
+@@ -0,0 +1,130 @@
++#include <string.h>
++#include "kernel/calls.h"
++#include "kernel/task.h"
++#include "kernel/signal.h"
++#include "fs/fd.h"
++#include "fs/poll.h"
++
++// signalfd(2). conmon (podman's container monitor) blocks SIGCHLD/SIGTERM/… and
++// reads them through a signalfd in its epoll loop instead of a handler; without
++// it conmon aborts ("Failed to create signalfd: Function not implemented") before
++// it can start the container. We back the signalfd by the caller thread's pending
++// signal set (current->pending + current->queue). iSH's poll_wait re-checks fds
++// on a bounded (~1s) timeout, so a blocked-but-pending signal becomes readable
++// without hooking signal delivery; the consuming read dequeues it.
++
++// Linux ABI: struct signalfd_siginfo is 128 bytes.
++struct signalfd_siginfo_ {
++    uint32_t ssi_signo;
++    int32_t  ssi_errno;
++    int32_t  ssi_code;
++    uint32_t ssi_pid;
++    uint32_t ssi_uid;
++    int32_t  ssi_fd;
++    uint32_t ssi_tid;
++    uint32_t ssi_band;
++    uint32_t ssi_overrun;
++    uint32_t ssi_trapno;
++    int32_t  ssi_status;
++    int32_t  ssi_int;
++    uint64_t ssi_ptr;
++    uint64_t ssi_utime;
++    uint64_t ssi_stime;
++    uint64_t ssi_addr;
++    uint16_t ssi_addr_lsb;
++    uint8_t  pad[46];
++};
++
++static struct fd_ops signalfd_ops;
++
++// Pull one pending signal in `mask` off the current thread's queue, filling out.
++// Must hold current->sighand->lock. Returns the signal number, or 0 if none.
++static int signalfd_dequeue(sigset_t_ mask, struct signalfd_siginfo_ *out) {
++    struct sigqueue *sigqueue, *tmp;
++    list_for_each_entry_safe(&current->queue, sigqueue, tmp, queue) {
++        int sig = sigqueue->info.sig;
++        if (!sigset_has(mask, sig))
++            continue;
++        list_remove(&sigqueue->queue);
++        sigset_del(&current->pending, sig);
++        memset(out, 0, sizeof(*out));
++        out->ssi_signo = sig;
++        out->ssi_errno = sigqueue->info.sig_errno;
++        out->ssi_code = sigqueue->info.code;
++        // kill/child share the leading pid/uid layout.
++        out->ssi_pid = sigqueue->info.child.pid;
++        out->ssi_uid = sigqueue->info.child.uid;
++        out->ssi_status = sigqueue->info.child.status;
++        free(sigqueue);
++        return sig;
++    }
++    return 0;
++}
++
++static ssize_t signalfd_read(struct fd *fd, void *buf, size_t bufsize) {
++    if (bufsize < sizeof(struct signalfd_siginfo_))
++        return _EINVAL;
++    sigset_t_ mask = fd->signalfd.mask;
++    size_t count = bufsize / sizeof(struct signalfd_siginfo_);
++    struct signalfd_siginfo_ *items = buf;
++
++    for (;;) {
++        size_t n = 0;
++        lock(&current->sighand->lock);
++        while (n < count && (current->pending & mask)) {
++            if (signalfd_dequeue(mask, &items[n]) == 0)
++                break;
++            n++;
++        }
++        unlock(&current->sighand->lock);
++        if (n > 0)
++            return n * sizeof(struct signalfd_siginfo_);
++        if (fd->flags & O_NONBLOCK_)
++            return _EAGAIN;
++        // No matching signal yet. Wait briefly and re-check — poll_wait's bounded
++        // re-poll is the normal path (conmon polls), this just avoids a busy spin
++        // for the rare blocking read.
++        struct timespec ts = {.tv_sec = 1, .tv_nsec = 0};
++        lock(&fd->lock);
++        int werr = wait_for(&fd->cond, &fd->lock, &ts);
++        unlock(&fd->lock);
++        if (werr == _EINTR)
++            return _EINTR;
++    }
++}
++
++static int signalfd_poll(struct fd *fd) {
++    int types = 0;
++    lock(&current->sighand->lock);
++    if (current->pending & fd->signalfd.mask)
++        types |= POLL_READ;
++    unlock(&current->sighand->lock);
++    return types;
++}
++
++static struct fd_ops signalfd_ops = {
++    .read = signalfd_read,
++    .poll = signalfd_poll,
++};
++
++fd_t sys_signalfd4(fd_t fd_no, addr_t mask_addr, dword_t mask_size, int_t flags) {
++    STRACE("signalfd4(%d, %#x, %d, %#x)", fd_no, mask_addr, mask_size, flags);
++    sigset_t_ mask;
++    if (user_get_sigset(mask_addr, mask_size, &mask))
++        return _EINVAL;
++
++    if (fd_no != -1) {
++        // Update the mask on an existing signalfd.
++        struct fd *fd = f_get(fd_no);
++        if (fd == NULL || fd->ops != &signalfd_ops)
++            return _EINVAL;
++        fd->signalfd.mask = mask;
++        return fd_no;
++    }
++
++    struct fd *fd = adhoc_fd_create(&signalfd_ops);
++    if (fd == NULL)
++        return _ENOMEM;
++    fd->signalfd.mask = mask;
++    return f_install(fd, flags);
++}
 diff --git a/kernel/task.c b/kernel/task.c
 index a61f430..cdda21c 100644
 --- a/kernel/task.c
@@ -952,3 +1152,15 @@ index a61f430..cdda21c 100644
  }
  
  static void task_run_tlb_cleanup(void *arg) {
+diff --git a/meson.build b/meson.build
+index 6ae3a04..2b75fdb 100644
+--- a/meson.build
++++ b/meson.build
+@@ -158,6 +158,7 @@ if get_option('kernel') == 'ish'
+         'kernel/random.c',
+         'kernel/misc.c',
+         'kernel/eventfd.c',
++        'kernel/signalfd.c',
+         'kernel/inotify.c',
+         'kernel/ipc.c',
+         'kernel/ptrace.c',
