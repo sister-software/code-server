@@ -100,6 +100,26 @@ index 4bd1f18..f1348a5 100644
          struct {
              struct timer *timer;
              uint64_t expirations;
+diff --git a/fs/inode.c b/fs/inode.c
+index 9eb80e7..ad2450c 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -75,7 +75,14 @@ void inode_release(struct inode_data *inode) {
+             inode->mount->fs->inode_orphaned(inode->mount, inode->number);
+         unlock(&inodes_lock);
+         mount_release(inode->mount);
+-        free(inode);
++        // Intentionally NOT freed (small struct leak). Same hazard class as the
++        // task-UAF fix: under heavy fork/exit/open churn (crun/podman) a racing
++        // path can still hold a pointer to a just-released inode and write
++        // through it, and recycling the struct corrupted the malloc freelist
++        // ("malloc freelist" SIGTRAP in inode_get_unlocked). Leaking it keeps the
++        // memory valid so a stray write can't poison the heap. FIXME: proper
++        // refcount/RCU lifecycle.
++        // free(inode);
+     } else {
+         unlock(&inode->lock);
+         unlock(&inodes_lock);
 diff --git a/fs/lock.c b/fs/lock.c
 index f247a06..9849fb8 100644
 --- a/fs/lock.c
