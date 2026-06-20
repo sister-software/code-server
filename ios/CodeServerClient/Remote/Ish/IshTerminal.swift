@@ -64,7 +64,7 @@ final class IshTerminal {
         // Versioned: bumping forces a fresh copy when the bundled rootfs changes
         // (e.g. i386 → arm64, rcarmo → OpenMinis, or new baked defaults), instead
         // of reusing a stale writable copy.
-        let version = "ish-rootfs-operator5"
+        let version = "ish-rootfs-operator6"
         let dest = support.appendingPathComponent(version, isDirectory: true)
         if !fm.fileExists(atPath: dest.appendingPathComponent("meta.db").path) {
             try? fm.createDirectory(at: support, withIntermediateDirectories: true)
