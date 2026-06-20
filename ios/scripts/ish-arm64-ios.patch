@@ -958,6 +958,24 @@ index 8edf84f..ef27bbe 100644
  int_t sys_capset(addr_t header_addr, addr_t data_addr) {
      STRACE("capset(%#x, %#x)", header_addr, data_addr);
      return 0;
+diff --git a/kernel/group.c b/kernel/group.c
+index 14d85a5..acf7e83 100644
+--- a/kernel/group.c
++++ b/kernel/group.c
+@@ -83,7 +83,12 @@ void task_leave_session(struct task *task) {
+     list_remove_safe(&group->session);
+     if (group->tty) {
+         lock(&ttys_lock);
+-        if (list_empty(&pid_get(group->sid)->session)) {
++        // The session-leader pid struct may already be gone (e.g. reaping a
++        // zombie whose session leader was reaped first). pid_get() then returns
++        // NULL and dereferencing ->session crashes — guard it. Under crun/podman
++        // process churn this NULL deref took down the whole app from sys_wait4.
++        struct pid *sid_pid = pid_get(group->sid);
++        if (sid_pid == NULL || list_empty(&sid_pid->session)) {
+             lock(&group->tty->lock);
+             group->tty->session = 0;
+             unlock(&group->tty->lock);
 diff --git a/kernel/misc.c b/kernel/misc.c
 index d86db45..77ca1e3 100644
 --- a/kernel/misc.c
