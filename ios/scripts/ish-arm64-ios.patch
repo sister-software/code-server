@@ -100,6 +100,47 @@ index 4bd1f18..f1348a5 100644
          struct {
              struct timer *timer;
              uint64_t expirations;
+diff --git a/fs/lock.c b/fs/lock.c
+index f247a06..9849fb8 100644
+--- a/fs/lock.c
++++ b/fs/lock.c
+@@ -197,6 +197,15 @@ int fcntl_getlk(struct fd *fd, struct flock_ *flock) {
+     if (flock->type != F_RDLCK_ && flock->type != F_WRLCK_)
+         return _EINVAL;
+     struct inode_data *inode = fd->inode;
++    // Some fds (e.g. anonymous/bind-mounted ones) have no inode_data, so there's
++    // no per-inode lock table to consult. iSH is single-user with cooperative
++    // processes, so report the region as lockable. Without this crun crashes
++    // (NULL deref in fcntl_setlk) when it POSIX-locks its container/storage
++    // lock files during `podman run`.
++    if (inode == NULL) {
++        flock->type = F_UNLCK_;
++        return 0;
++    }
+     lock(&inode->lock);
+ 
+     struct file_lock request;
+@@ -224,6 +233,11 @@ int fcntl_setlk(struct fd *fd, struct flock_ *flock, bool blocking) {
+         return _EBADF;
+ 
+     struct inode_data *inode = fd->inode;
++    // No inode_data (anonymous/bind-mounted fd) → no lock table. Treat the lock
++    // as granted (single-user, advisory). Prevents a NULL deref crash on crun's
++    // POSIX locks during `podman run`.
++    if (inode == NULL)
++        return 0;
+     lock(&inode->lock);
+ 
+     struct file_lock request;
+@@ -244,6 +258,8 @@ out:
+ 
+ void file_lock_remove_owned_by(struct fd *fd, void *owner) {
+     struct inode_data *inode = fd->inode;
++    if (inode == NULL)
++        return;
+     lock(&inode->lock);
+     struct file_lock *lock, *tmp;
+     list_for_each_entry_safe(&inode->posix_locks, lock, tmp, locks) {
 diff --git a/fs/mount.c b/fs/mount.c
 index 68435ed..dc9c8ad 100644
 --- a/fs/mount.c
