@@ -461,9 +461,18 @@ index 462ace4..7de4fa1 100644
  }
  
 diff --git a/kernel/arch/arm64/calls.c b/kernel/arch/arm64/calls.c
-index 1f35c16..2089842 100644
+index 1f35c16..b85d9a6 100644
 --- a/kernel/arch/arm64/calls.c
 +++ b/kernel/arch/arm64/calls.c
+@@ -51,7 +51,7 @@ syscall_t syscall_table[] = {
+     [38]  = (syscall_t) sys_renameat,
+     [39]  = (syscall_t) sys_umount2,
+     [40]  = (syscall_t) sys_mount,
+-    [41]  = (syscall_t) syscall_stub, // pivot_root
++    [41]  = (syscall_t) sys_pivot_root,
+     [42]  = (syscall_t) syscall_stub, // nfsservctl
+     [43]  = (syscall_t) sys_statfs_arm64,
+     [44]  = (syscall_t) sys_fstatfs_arm64,
 @@ -84,7 +84,7 @@ syscall_t syscall_table[] = {
      [71]  = (syscall_t) sys_sendfile64,
      [72]  = (syscall_t) sys_pselect,
@@ -495,7 +504,7 @@ index 1f35c16..2089842 100644
      [283] = (syscall_t) syscall_silent_stub, // membarrier
      [284] = (syscall_t) syscall_stub, // mlock2
 diff --git a/kernel/calls.h b/kernel/calls.h
-index 65a30c7..e7e757d 100644
+index 65a30c7..72bcc44 100644
 --- a/kernel/calls.h
 +++ b/kernel/calls.h
 @@ -30,9 +30,13 @@ int must_check user_write_string(addr_t addr, const char *buf);
@@ -527,6 +536,14 @@ index 65a30c7..e7e757d 100644
  dword_t sys_mount(addr_t source_addr, addr_t target_addr, addr_t type_addr, dword_t flags, addr_t data_addr);
  dword_t sys_umount2(addr_t target_addr, dword_t flags);
  
+@@ -244,6 +255,7 @@ int_t sys_capset(addr_t header_addr, addr_t data_addr);
+ dword_t sys_getcwd(addr_t buf_addr, dword_t size);
+ dword_t sys_chdir(addr_t path_addr);
+ dword_t sys_chroot(addr_t path_addr);
++dword_t sys_pivot_root(addr_t new_root_addr, addr_t put_old_addr);
+ dword_t sys_fchdir(fd_t f);
+ int_t sys_personality(dword_t pers);
+ int task_set_thread_area(struct task *task, addr_t u_info);
 diff --git a/kernel/exec.c b/kernel/exec.c
 index 430a584..b2493fa 100644
 --- a/kernel/exec.c
@@ -740,10 +757,46 @@ index f8b0287..150625a 100644
      }
      if (flags & CLONE_SIGHAND_ && !(flags & CLONE_VM_))
 diff --git a/kernel/fs.c b/kernel/fs.c
-index dcca77a..62fc470 100644
+index dcca77a..2501ee6 100644
 --- a/kernel/fs.c
 +++ b/kernel/fs.c
-@@ -854,6 +854,18 @@ dword_t sys_umask(dword_t mask) {
+@@ -844,6 +844,35 @@ dword_t sys_chroot(addr_t path_addr) {
+     return 0;
+ }
+ 
++dword_t sys_pivot_root(addr_t new_root_addr, addr_t put_old_addr) {
++    char new_root[MAX_PATH], put_old[MAX_PATH] = "";
++    if (user_read_string(new_root_addr, new_root, sizeof(new_root)))
++        return _EFAULT;
++    if (put_old_addr != 0 && user_read_string(put_old_addr, put_old, sizeof(put_old)))
++        return _EFAULT;
++    STRACE("pivot_root(\"%s\", \"%s\")", new_root, put_old);
++    // iSH has no mount namespaces; emulate pivot_root by making new_root both the
++    // process root and cwd (chroot + chdir). crun/runc pivot_root into the
++    // container rootfs to start the container; this was a stub returning ENOSYS,
++    // so the container init aborted silently and `podman run` reported an empty
++    // conmon sync ("conmon bytes \"\""). The old root isn't relocated to put_old
++    // (no mounts to move) — the subsequent umount of the old root is a no-op.
++    struct fd *root = open_dir(new_root);
++    if (IS_ERR(root))
++        return PTR_ERR(root);
++    struct fd *pwd = open_dir(new_root);
++    if (IS_ERR(pwd)) {
++        fd_close(root);
++        return PTR_ERR(pwd);
++    }
++    lock(&current->fs->lock);
++    fd_close(current->fs->root);
++    current->fs->root = root;
++    unlock(&current->fs->lock);
++    fs_chdir(current->fs, pwd);
++    return 0;
++}
++
+ dword_t sys_umask(dword_t mask) {
+     STRACE("umask(0%o)", mask);
+     struct fs_info *fs = current->fs;
+@@ -854,6 +883,18 @@ dword_t sys_umask(dword_t mask) {
      return old_umask;
  }
  
@@ -762,7 +815,7 @@ index dcca77a..62fc470 100644
  static int mount_statfs(struct mount *mount, struct statfsbuf *stat) {
      int err = 0;
      if (mount->fs->statfs)
-@@ -863,11 +875,12 @@ static int mount_statfs(struct mount *mount, struct statfsbuf *stat) {
+@@ -863,11 +904,12 @@ static int mount_statfs(struct mount *mount, struct statfsbuf *stat) {
      return err;
  }
  
@@ -776,7 +829,7 @@ index dcca77a..62fc470 100644
      struct statfs_ out_buf = {
          .type = buf.type,
          .bsize = buf.bsize,
-@@ -886,11 +899,12 @@ static int_t statfs_mount(struct mount *mount, addr_t buf_addr) {
+@@ -886,11 +928,12 @@ static int_t statfs_mount(struct mount *mount, addr_t buf_addr) {
      return 0;
  }
  
@@ -790,7 +843,7 @@ index dcca77a..62fc470 100644
      struct statfs64_ out_buf = {
          .type = buf.type,
          .bsize = buf.bsize,
-@@ -919,7 +933,7 @@ dword_t sys_statfs(addr_t path_addr, addr_t buf_addr) {
+@@ -919,7 +962,7 @@ dword_t sys_statfs(addr_t path_addr, addr_t buf_addr) {
      if (err < 0)
          return err;
      struct mount *mount = mount_find(path);
@@ -799,7 +852,7 @@ index dcca77a..62fc470 100644
      mount_release(mount);
      return err;
  }
-@@ -936,27 +950,28 @@ dword_t sys_statfs64(addr_t path_addr, dword_t buf_size, addr_t buf_addr) {
+@@ -936,27 +979,28 @@ dword_t sys_statfs64(addr_t path_addr, dword_t buf_size, addr_t buf_addr) {
      if (err < 0)
          return err;
      struct mount *mount = mount_find(path);
@@ -832,7 +885,7 @@ index dcca77a..62fc470 100644
      struct statfs_arm64_ out_buf = {
          .type = buf.type,
          .bsize = buf.bsize,
-@@ -985,7 +1000,7 @@ dword_t sys_statfs_arm64(addr_t path_addr, addr_t buf_addr) {
+@@ -985,7 +1029,7 @@ dword_t sys_statfs_arm64(addr_t path_addr, addr_t buf_addr) {
      if (err < 0)
          return err;
      struct mount *mount = mount_find(path);
@@ -841,7 +894,7 @@ index dcca77a..62fc470 100644
      mount_release(mount);
      return err;
  }
-@@ -995,7 +1010,7 @@ dword_t sys_fstatfs_arm64(fd_t f, addr_t buf_addr) {
+@@ -995,7 +1039,7 @@ dword_t sys_fstatfs_arm64(fd_t f, addr_t buf_addr) {
      struct fd *fd = f_get(f);
      if (fd == NULL)
          return _EBADF;
