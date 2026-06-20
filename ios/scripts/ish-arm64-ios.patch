@@ -385,7 +385,7 @@ index 05861c7..5b6b475 100644
  
  struct proc_dir_entry proc_pid = {NULL, S_IFDIR,
 diff --git a/fs/sock.c b/fs/sock.c
-index 38c8ed4..6337067 100644
+index 38c8ed4..1619ba8 100644
 --- a/fs/sock.c
 +++ b/fs/sock.c
 @@ -562,6 +562,14 @@ int_t sys_socketpair(dword_t domain, dword_t type, dword_t protocol, addr_t sock
@@ -403,6 +403,21 @@ index 38c8ed4..6337067 100644
  
      int sockets[2];
      int err = socketpair(real_domain, real_type, protocol, sockets);
+@@ -1500,6 +1508,14 @@ static ssize_t sock_read(struct fd *fd, void *buf, size_t size) {
+                current->pid, current->comm, fd->real_fd, eintr_count, err);
+     }
+     sock_translate_err(fd, &err);
++    // SOCK_SEQPACKET is emulated with SOCK_DGRAM (macOS has no AF_UNIX
++    // SEQPACKET). When the peer closes, a DGRAM socketpair lets the reader drain
++    // buffered messages and then returns ECONNRESET, whereas real SEQPACKET
++    // returns EOF (0). crun's container-init sync does a final read expecting a
++    // clean EOF and treats ECONNRESET as fatal ("read parent: connection reset
++    // by peer"), aborting `podman run`. Map the post-close reset back to EOF.
++    if (err == _ECONNRESET && (fd->socket.type & 0xff) == SOCK_SEQPACKET_)
++        err = 0;
+     return err;
+ }
+ 
 diff --git a/fs/sock.h b/fs/sock.h
 index 6aeb2f7..9a92105 100644
 --- a/fs/sock.h
