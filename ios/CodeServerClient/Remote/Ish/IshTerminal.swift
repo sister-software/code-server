@@ -56,6 +56,19 @@ final class IshTerminal {
         queue.async(execute: work)
     }
 
+    /// USB-driven automation: if launched with CODE_ISH_TEST_CMD set, boot the
+    /// guest headless and run that command (output streams to os_log as HLOG:…),
+    /// instead of waiting for the workbench to open a terminal. Used to iterate on
+    /// the offline Linux guest without manual interaction.
+    static func runHeadlessTestIfRequested() {
+        guard let cmd = ProcessInfo.processInfo.environment["CODE_ISH_TEST_CMD"],
+              !cmd.isEmpty else { return }
+        shared.queue.async {
+            let root = shared.prepareWritableRootfs()
+            root.withCString { r in cmd.withCString { c in ish_run_headless(r, c) } }
+        }
+    }
+
     /// The guest writes to its filesystem, so copy the bundled read-only fakefs
     /// to Application Support on first run and boot from there.
     private func prepareWritableRootfs() -> String {

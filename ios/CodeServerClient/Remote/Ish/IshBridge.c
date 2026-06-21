@@ -103,8 +103,31 @@ static int ish_tty_init(struct tty *tty) {
     return 0;
 }
 
+// Headless test mode: when set, console output is teed to the kernel log so an
+// off-device driver can read it over os_log/idevicesyslog. Empty in normal use.
+static char g_headless_cmd[8192] = "";
+
+// Line-buffer console bytes and emit each completed line via printk (→ os_log)
+// with an "HLOG:" prefix. Control bytes (escape sequences etc.) are dropped so
+// the captured text is greppable.
+static void headless_emit(const char *buf, int len) {
+    static char line[4096];
+    static size_t n = 0;
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char) buf[i];
+        if (c == '\n') {
+            line[n] = '\0';
+            if (n > 0) printk("HLOG:%s\n", line);
+            n = 0;
+        } else if (c >= 0x20 && c < 0x7f && n < sizeof(line) - 1) {
+            line[n++] = (char) c;
+        }
+    }
+}
+
 static int ish_tty_write(struct tty *tty, const void *buf, size_t len, bool blocking) {
     (void) blocking;
+    if (g_headless_cmd[0] != '\0') headless_emit((const char *) buf, (int) len);
     if (g_output) g_output((int) (intptr_t) tty->data, (const char *) buf, (int) len);
     return (int) len;
 }
@@ -251,6 +274,33 @@ static const char k_envp[] =
 // as non-root would fail ("su: must be suid to work properly"). Both fall back to
 // /bin/sh. .zshrc cd's login shells to $HOME (init children don't inherit cwd).
 static int exec_boot_shell(void) {
+    // Headless test mode: run the command as the operator login shell instead of
+    // an interactive one, appending a completion marker with the exit status.
+    if (g_headless_cmd[0] != '\0') {
+        static char hc[8400];
+        snprintf(hc, sizeof(hc), "%s; echo __ISH_DONE__$?", g_headless_cmd);
+        // Packed null-separated argv: "/bin/su\0-l\0operator\0-c\0<hc>\0".
+        static char argv[8600];
+        const char *parts[] = {"/bin/su", "-l", "operator", "-c", hc};
+        size_t o = 0;
+        for (int i = 0; i < 5; i++) {
+            size_t l = strlen(parts[i]);
+            memcpy(argv + o, parts[i], l + 1);
+            o += l + 1;
+        }
+        int err = do_execve("/bin/su", 5, argv, k_envp);
+        if (err < 0) {
+            const char *p2[] = {"/bin/sh", "-c", hc};
+            o = 0;
+            for (int i = 0; i < 3; i++) {
+                size_t l = strlen(p2[i]);
+                memcpy(argv + o, p2[i], l + 1);
+                o += l + 1;
+            }
+            err = do_execve("/bin/sh", 3, argv, k_envp);
+        }
+        return err;
+    }
     int err = do_execve("/bin/su", 3, k_su_argv, k_envp);
     if (err < 0) err = do_execve("/bin/sh", 2, k_sh_argv, k_envp);
     return err;
@@ -262,10 +312,32 @@ static int exec_pty_shell(void) {
     return err;
 }
 
+// iSH backs every guest unix-domain socket with a real host socket created at
+// "<sock_tmp_prefix><pid>.<id>". The default "/tmp/ishsock" is unwritable in the
+// iOS app sandbox, so bind(2) fails EPERM — which breaks conmon's attach/console
+// socket and thus `podman run`. Redirect it to the app's writable temp dir
+// (TMPDIR), matching what the upstream iSH AppDelegate does. The path stays well
+// under sun_path's 108-char limit.
+extern const char *sock_tmp_prefix;
+static void configure_socket_tmp(void) {
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0')
+        return;
+    size_t len = strlen(tmpdir);
+    char *buf = malloc(len + sizeof("ishsock") + 1);
+    if (buf == NULL)
+        return;
+    // TMPDIR usually ends with '/'; append without duplicating the separator.
+    snprintf(buf, len + sizeof("ishsock") + 1, "%s%sishsock",
+             tmpdir, tmpdir[len - 1] == '/' ? "" : "/");
+    sock_tmp_prefix = buf;
+}
+
 static int boot_kernel(const char *fakefs_dir, int first_id, int cols, int rows) {
     char source[4096];
     snprintf(source, sizeof(source), "%s/data", fakefs_dir);
 
+    configure_socket_tmp();
     install_crash_handler();  // recover guest page faults (else `ls` etc. crash)
     int err = mount_root(&fakefs, source);
     if (err < 0) return err;
@@ -321,6 +393,13 @@ int ish_open_terminal(int term_id, int cols, int rows, const char *fakefs_dir) {
         return 0;
     }
     return spawn_pty(term_id, cols, rows);
+}
+
+void ish_run_headless(const char *fakefs_dir, const char *cmd) {
+    if (g_booted) return; // one-shot per process; relaunch for a new test
+    snprintf(g_headless_cmd, sizeof(g_headless_cmd), "%s", cmd);
+    if (boot_kernel(fakefs_dir, 1, 80, 24) == 0)
+        g_booted = 1;
 }
 
 void ish_send_input(int term_id, const char *buf, int len) {

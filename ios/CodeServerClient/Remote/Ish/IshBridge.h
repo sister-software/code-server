@@ -19,6 +19,13 @@ int ish_open_terminal(int term_id, int cols, int rows, const char *fakefs_dir);
 // Feed raw keystrokes to a terminal.
 void ish_send_input(int term_id, const char *buf, int len);
 
+// Headless test mode (USB-driven automation): boot the guest and run `cmd` as
+// the operator login shell instead of an interactive terminal. The command's
+// console output is teed to the kernel log (os_log) line-by-line with an "HLOG:"
+// prefix, ending with "HLOG:__ISH_DONE__<exit>". Driven by CODE_ISH_TEST_CMD;
+// not part of normal app operation.
+void ish_run_headless(const char *fakefs_dir, const char *cmd);
+
 // Update a terminal's window size.
 void ish_set_winsize(int term_id, int cols, int rows);
 
